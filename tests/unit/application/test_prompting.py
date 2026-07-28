@@ -21,4 +21,6 @@ def test_prompt_contains_resolved_settings_and_delimited_page_markdown() -> None
     assert "Physical PDF page: 7" in prompt
     assert '"style": "faithful"' in prompt
     assert '"Kolera": "cholera"' in prompt
+    assert "authoritative translation" in prompt
+    assert "assertion for this document" in prompt
     assert "SOURCE_MARKDOWN_START\n# Om Kolera\nSOURCE_MARKDOWN_END" in prompt

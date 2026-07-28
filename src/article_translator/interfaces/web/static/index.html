@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>ArticleTranslator</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+    <script type="module" src="/assets/app.js"></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <a class="wordmark" href="/" aria-label="ArticleTranslator home">
+        <span class="wordmark-mark" aria-hidden="true">AT</span>
+        <span>ArticleTranslator</span>
+      </a>
+      <span class="local-label">Local workspace</span>
+    </header>
+
+    <nav class="tab-bar" role="tablist" aria-label="Translator sections">
+      <button
+        id="translate-tab"
+        class="tab-button"
+        type="button"
+        role="tab"
+        aria-selected="true"
+        aria-controls="translate-panel"
+        data-tab="translate"
+      >Translate</button>
+      <button
+        id="mappings-tab"
+        class="tab-button"
+        type="button"
+        role="tab"
+        aria-selected="false"
+        aria-controls="mappings-panel"
+        tabindex="-1"
+        data-tab="mappings"
+      >Term mappings</button>
+      <button
+        id="settings-tab"
+        class="tab-button"
+        type="button"
+        role="tab"
+        aria-selected="false"
+        aria-controls="settings-panel"
+        tabindex="-1"
+        data-tab="settings"
+      >Settings</button>
+      <button
+        id="review-tab"
+        class="tab-button"
+        type="button"
+        role="tab"
+        aria-selected="false"
+        aria-controls="review-panel"
+        aria-disabled="true"
+        tabindex="-1"
+        disabled
+        data-tab="review"
+      >Review</button>
+    </nav>
+
+    <div
+      id="global-alert"
+      class="global-alert"
+      role="alert"
+      tabindex="-1"
+      hidden
+    >
+      <span id="global-alert-message"></span>
+      <button id="dismiss-alert" type="button" aria-label="Dismiss message">×</button>
+    </div>
+
+    <main class="workspace">
+      <section
+        id="translate-panel"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="translate-tab"
+        data-testid="setup-view"
+      >
+        <header class="panel-header">
+          <div>
+            <h1>Translate PDF</h1>
+            <p>Select a PDF and confirm the language direction.</p>
+          </div>
+        </header>
+
+        <div id="translation-setup">
+          <form id="translation-form" class="form-card" novalidate>
+            <div class="field-group">
+              <label class="field-label" for="pdf-input">PDF file</label>
+              <label class="drop-zone" id="drop-zone" for="pdf-input">
+                <input
+                  id="pdf-input"
+                  data-testid="pdf-input"
+                  type="file"
+                  name="pdf"
+                  accept=".pdf,application/pdf"
+                  aria-describedby="file-detail file-error"
+                  required
+                >
+                <span class="upload-icon" aria-hidden="true">↑</span>
+                <strong>Select a PDF from your laptop</strong>
+                <span id="file-detail">No file selected</span>
+              </label>
+              <p id="file-error" class="field-error" hidden></p>
+            </div>
+
+            <div class="language-grid">
+              <label class="field-label" for="source-language">
+                Input language
+                <input
+                  id="source-language"
+                  data-testid="source-language"
+                  type="text"
+                  autocomplete="off"
+                  required
+                >
+              </label>
+              <span class="language-arrow" aria-hidden="true">→</span>
+              <label class="field-label" for="target-language">
+                Output language
+                <input
+                  id="target-language"
+                  data-testid="target-language"
+                  type="text"
+                  autocomplete="off"
+                  required
+                >
+              </label>
+            </div>
+            <p id="language-error" class="field-error" hidden></p>
+
+            <div class="form-footer">
+              <p class="privacy-note" id="privacy-note">
+                The configured provider receives one page image and its extracted
+                text per request. Files and review data are stored locally.
+              </p>
+              <div class="submit-actions">
+                <p id="form-error" class="field-error submit-error" hidden></p>
+                <button
+                  class="primary-button"
+                  data-testid="start-translation"
+                  id="start-translation"
+                  type="submit"
+                >
+                  <span class="button-label">Start translation</span>
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+
+        <section
+          id="job-progress"
+          class="progress-card"
+          data-testid="progress-view"
+          aria-labelledby="progress-heading"
+          hidden
+        >
+          <div class="progress-heading-row">
+            <div>
+              <h2 id="progress-heading">Translation status</h2>
+              <p class="progress-file" id="progress-filename"></p>
+            </div>
+            <span id="progress-status" class="status-badge">Preparing</span>
+          </div>
+          <div
+            id="progress-announcement"
+            class="progress-announcement"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >Preparing the document…</div>
+          <progress id="page-progress" max="1" value="0">0%</progress>
+          <div class="progress-meta">
+            <span id="progress-pages">Waiting for page count</span>
+          </div>
+          <div id="progress-error-actions" class="progress-actions" hidden>
+            <button id="back-to-setup" class="secondary-button" type="button">
+              Choose another PDF
+            </button>
+          </div>
+        </section>
+      </section>
+
+      <section
+        id="mappings-panel"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="mappings-tab"
+        data-testid="mappings-view"
+        hidden
+      >
+        <header class="panel-header">
+          <div>
+            <h1>Term mappings</h1>
+            <p>Set required translations for archaic or specialist terms.</p>
+          </div>
+          <button
+            class="secondary-button compact-control"
+            data-testid="add-mapping"
+            id="add-mapping"
+            type="button"
+          >Add term</button>
+        </header>
+
+        <div class="table-card">
+          <table aria-describedby="mapping-help mapping-error">
+            <thead>
+              <tr>
+                <th scope="col">Source term</th>
+                <th scope="col">Required translation</th>
+                <th scope="col"><span class="sr-only">Remove</span></th>
+              </tr>
+            </thead>
+            <tbody id="mapping-body"></tbody>
+          </table>
+          <p id="mapping-help" class="empty-message">
+            No term mappings. Add only terms that need a fixed translation.
+          </p>
+          <p id="mapping-error" class="field-error" hidden></p>
+        </div>
+      </section>
+
+      <section
+        id="settings-panel"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="settings-tab"
+        data-testid="settings-view"
+        hidden
+      >
+        <header class="panel-header">
+          <div>
+            <h1>Settings</h1>
+            <p>Settings apply to the next translation job.</p>
+          </div>
+        </header>
+
+        <div class="settings-card">
+          <section class="settings-section" aria-labelledby="provider-heading">
+            <h2 id="provider-heading">Gemini</h2>
+            <label class="field-label" for="model-select">
+              Model
+              <select id="model-select" data-testid="model-select"></select>
+            </label>
+
+            <label class="field-label" for="gemini-api-key">
+              Gemini API key
+              <input
+                id="gemini-api-key"
+                data-testid="gemini-api-key"
+                type="password"
+                autocomplete="new-password"
+                spellcheck="false"
+              >
+              <small id="api-key-status">Checking for a saved key…</small>
+            </label>
+            <label class="checkbox-field" for="save-api-key">
+              <input id="save-api-key" data-testid="save-api-key" type="checkbox">
+              <span>
+                Save on this computer
+                <small>Leave unchecked to keep the entered key for this browser session only.</small>
+              </span>
+            </label>
+            <p id="api-key-error" class="field-error" hidden></p>
+            <p id="settings-message" class="settings-message" role="status" aria-live="polite"></p>
+            <div class="settings-actions">
+              <button
+                id="save-settings"
+                class="primary-button compact-control"
+                data-testid="save-settings"
+                type="button"
+              >Save settings</button>
+              <button
+                id="clear-saved-key"
+                class="text-button danger-button"
+                type="button"
+                hidden
+              >Clear saved key</button>
+            </div>
+          </section>
+
+          <section class="settings-section" aria-labelledby="style-heading">
+            <h2 id="style-heading">Translation</h2>
+            <label class="field-label" for="translation-style">
+              Translation style
+              <select id="translation-style" data-testid="translation-style">
+                <option value="faithful">Faithful</option>
+                <option value="balanced">Balanced</option>
+                <option value="readable">Readable</option>
+              </select>
+            </label>
+          </section>
+        </div>
+      </section>
+
+      <section
+        id="review-panel"
+        class="tab-panel review-panel"
+        role="tabpanel"
+        aria-labelledby="review-tab"
+        data-testid="review-view"
+        hidden
+      >
+        <header class="review-toolbar">
+          <div>
+            <h1 id="review-heading">Review</h1>
+            <p class="review-document" id="review-document"></p>
+          </div>
+          <div class="review-actions">
+            <span id="review-progress" class="review-progress"></span>
+            <button
+              id="new-translation"
+              class="secondary-button compact-control"
+              type="button"
+            >New translation</button>
+            <a id="export-link" class="secondary-button compact-control" href="#" download>
+              Export Markdown
+            </a>
+          </div>
+        </header>
+
+        <div class="review-key" aria-label="Review legend">
+          <span><i class="legend-source" aria-hidden="true"></i> Original</span>
+          <span><i class="legend-uncertain" aria-hidden="true">?</i> Needs attention</span>
+          <span id="active-page-label">Physical page 1</span>
+        </div>
+
+        <div class="review-grid">
+          <section class="review-pane source-pane" aria-labelledby="source-heading">
+            <header class="pane-heading">
+              <h2 id="source-heading">Original text</h2>
+              <span>Follows translation</span>
+            </header>
+            <div
+              id="source-scroll"
+              class="document-scroll source-scroll"
+              aria-label="Original text, synchronized with the translation"
+              aria-readonly="true"
+            >
+              <div id="source-content" class="document-content"></div>
+            </div>
+          </section>
+
+          <section class="review-pane translation-pane" aria-labelledby="translation-heading">
+            <header class="pane-heading">
+              <h2 id="translation-heading">Translated text</h2>
+              <span>Scroll and edit here</span>
+            </header>
+            <div
+              id="translation-scroll"
+              class="document-scroll translation-scroll"
+              data-testid="translation-scroll"
+              tabindex="0"
+              aria-label="Editable translated text"
+            >
+              <div id="translation-content" class="document-content"></div>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="uncertainty-dialog" class="uncertainty-dialog" aria-labelledby="uncertainty-title">
+      <form id="uncertainty-form" method="dialog">
+        <button
+          id="close-uncertainty"
+          class="dialog-close"
+          type="button"
+          aria-label="Close uncertainty review"
+        >×</button>
+        <h2 id="uncertainty-title">Review uncertain translation</h2>
+
+        <dl class="uncertainty-detail">
+          <div>
+            <dt>Original term</dt>
+            <dd id="uncertainty-source"></dd>
+          </div>
+          <div>
+            <dt>Model suggestion</dt>
+            <dd id="uncertainty-proposed"></dd>
+          </div>
+          <div>
+            <dt>Reason</dt>
+            <dd id="uncertainty-reason"></dd>
+          </div>
+          <div id="alternatives-row">
+            <dt>Alternatives</dt>
+            <dd id="uncertainty-alternatives"></dd>
+          </div>
+        </dl>
+
+        <p id="fallback-instruction" class="fallback-instruction" hidden>
+          This uncertainty could not be aligned to an exact range. Edit the
+          translated block manually, then save or validate it.
+        </p>
+        <label id="replacement-field" class="field-label" for="replacement-input">
+          Correct translation
+          <input
+            id="replacement-input"
+            data-testid="uncertainty-replacement"
+            type="text"
+            autocomplete="off"
+            required
+          >
+        </label>
+        <p id="replacement-error" class="field-error" hidden></p>
+
+        <div class="dialog-actions">
+          <button id="cancel-uncertainty" class="text-button" type="button">Cancel</button>
+          <button
+            id="translate-one"
+            class="secondary-button compact-control"
+            data-testid="translate-one"
+            type="button"
+          >Translate One</button>
+          <button
+            id="translate-all"
+            class="primary-button compact-control"
+            data-testid="translate-all"
+            type="button"
+            hidden
+          >Translate All</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

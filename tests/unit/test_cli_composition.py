@@ -8,6 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 import article_translator.cli as cli
+import article_translator.composition as composition
 from article_translator.application.pipeline import TranslationPipeline
 from article_translator.config import ProjectConfig, load_project_config
 from article_translator.domain.models import (
@@ -138,7 +139,11 @@ def test_provider_and_translation_settings_are_composed_from_config(
     config = load_project_config(Path("config/default.toml"))
     pipeline = RecordingPipeline()
     monkeypatch.setenv("GEMINI_API_KEY", "test-only-key")
-    monkeypatch.setattr(cli, "GeminiPageTranslator", RecordingGeminiTranslator)
+    monkeypatch.setattr(
+        composition,
+        "GeminiPageTranslator",
+        RecordingGeminiTranslator,
+    )
 
     cli._translate(
         config,

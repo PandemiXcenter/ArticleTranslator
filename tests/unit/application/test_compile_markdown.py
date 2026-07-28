@@ -13,6 +13,7 @@ from article_translator.domain.models import (
 )
 
 HASH = "b" * 64
+RUN_ID = "1" * 32
 FIXED_TIME = datetime(2026, 1, 2, tzinfo=UTC)
 
 
@@ -35,6 +36,7 @@ def document() -> DocumentTranslation:
         byte_count=100,
     )
     page = PageTranslation(
+        translation_run_id=RUN_ID,
         original_page_number=1,
         extraction_status=ExtractionStatus.EXTRACTED,
         extracted_character_count=6,
@@ -67,6 +69,7 @@ def document() -> DocumentTranslation:
         translated_at=FIXED_TIME,
     )
     return DocumentTranslation(
+        translation_run_id=RUN_ID,
         document_id=HASH,
         job_id="document-bbbbbbbbbbbb",
         source_file_name="document.pdf",

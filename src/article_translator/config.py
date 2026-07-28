@@ -1,8 +1,8 @@
 from pathlib import Path
 from tomllib import TOMLDecodeError, load
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from article_translator.domain.enums import TranslationStyle
@@ -45,15 +45,35 @@ class ExtractionConfig(ConfigModel):
 
 class GeminiConfig(ConfigModel):
     model: NonEmptyText
+    selectable_models: list[NonEmptyText]
     api_version: NonEmptyText
     request_timeout_seconds: int = Field(ge=1, le=900)
     request_attempts: int = Field(ge=1, le=10)
     max_inline_request_bytes: int = Field(ge=1_000_000, le=20_000_000)
 
+    @model_validator(mode="after")
+    def default_model_must_be_selectable(self) -> Self:
+        if len(self.selectable_models) != len(set(self.selectable_models)):
+            raise ValueError("selectable_models must be unique")
+        if self.model not in self.selectable_models:
+            raise ValueError("default model must appear in selectable_models")
+        return self
+
 
 class ProviderConfig(ConfigModel):
     name: Literal["gemini"]
     gemini: GeminiConfig
+
+
+class WebConfig(ConfigModel):
+    host: Literal["127.0.0.1", "::1", "localhost"]
+    port: int = Field(ge=1, le=65_535)
+    max_upload_bytes: int = Field(ge=1_000_000, le=1_000_000_000)
+    max_concurrent_jobs: int = Field(ge=1, le=4)
+    max_pdf_pages: int = Field(ge=1, le=10_000)
+    max_glossary_entries: int = Field(ge=0, le=10_000)
+    max_term_characters: int = Field(ge=1, le=4_000)
+    status_poll_interval_ms: int = Field(ge=250, le=30_000)
 
 
 class ConfiguredTranslationSettings(TranslationSettings):
@@ -87,6 +107,7 @@ class ProjectConfig(ConfigModel):
     provider: ProviderConfig
     translation: ConfiguredTranslationSettings
     export: ConfiguredMarkdownExportSettings
+    web: WebConfig
 
 
 def load_project_config(path: Path) -> ProjectConfig:

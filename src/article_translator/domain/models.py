@@ -19,9 +19,10 @@ from article_translator.domain.enums import (
     TranslationStyle,
 )
 
-SCHEMA_VERSION: Literal["1.0"] = "1.0"
+SCHEMA_VERSION: Literal["2.0"] = "2.0"
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+TranslationRunId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
 ProviderSetting = str | int | float | bool
 
 
@@ -168,7 +169,8 @@ class TranslatedBlock(ContractModel):
 class PageTranslation(ContractModel):
     """One independently retriable and cacheable page result."""
 
-    schema_version: Literal["1.0"] = SCHEMA_VERSION
+    schema_version: Literal["2.0"] = SCHEMA_VERSION
+    translation_run_id: TranslationRunId
     original_page_number: int = Field(ge=1)
     pdf_page_label: str | None = None
     detected_printed_page_label: str | None = None
@@ -196,7 +198,7 @@ class PageTranslation(ContractModel):
 class JobManifest(ContractModel):
     """Mutable run index; page artifacts remain the recovery source of truth."""
 
-    schema_version: Literal["1.0"] = SCHEMA_VERSION
+    schema_version: Literal["2.0"] = SCHEMA_VERSION
     job_id: NonEmptyText
     preparation_id: NonEmptyText
     document_id: Sha256
@@ -206,6 +208,8 @@ class JobManifest(ContractModel):
     page_count: int = Field(ge=1)
     pages: list[PreparedPage] = Field(min_length=1)
     status: JobStatus = JobStatus.PREPARED
+    translation_run_id: TranslationRunId | None = None
+    translation_run_ids: list[TranslationRunId] = Field(default_factory=list)
     translation_settings: TranslationSettings | None = None
     provider_name: str | None = None
     provider_model: str | None = None
@@ -222,11 +226,18 @@ class JobManifest(ContractModel):
         expected = list(range(1, self.page_count + 1))
         if numbers != expected:
             raise ValueError(f"manifest pages must be physical pages {expected}")
+        if len(self.translation_run_ids) != len(set(self.translation_run_ids)):
+            raise ValueError("manifest translation run IDs must be unique")
+        if (
+            self.translation_run_id is not None
+            and self.translation_run_id not in self.translation_run_ids
+        ):
+            raise ValueError("active translation run must appear in the ordered run index")
         return self
 
 
 class PageFailure(ContractModel):
-    schema_version: Literal["1.0"] = SCHEMA_VERSION
+    schema_version: Literal["2.0"] = SCHEMA_VERSION
     original_page_number: int = Field(ge=1)
     input_fingerprint: Sha256 | None = None
     error_type: NonEmptyText
@@ -237,7 +248,8 @@ class PageFailure(ContractModel):
 class DocumentTranslation(ContractModel):
     """Canonical dataset consumed by the future editor and all exporters."""
 
-    schema_version: Literal["1.0"] = SCHEMA_VERSION
+    schema_version: Literal["2.0"] = SCHEMA_VERSION
+    translation_run_id: TranslationRunId
     document_id: Sha256
     job_id: NonEmptyText
     source_file_name: NonEmptyText
@@ -253,4 +265,6 @@ class DocumentTranslation(ContractModel):
         expected = list(range(1, self.page_count + 1))
         if numbers != expected:
             raise ValueError(f"document must contain translated physical pages {expected}")
+        if any(page.translation_run_id != self.translation_run_id for page in self.pages):
+            raise ValueError("every page must belong to the document translation run")
         return self

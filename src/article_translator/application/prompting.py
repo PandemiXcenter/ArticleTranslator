@@ -4,12 +4,12 @@ from importlib.resources import files
 
 from article_translator.domain.models import TranslationSettings
 
-PROMPT_VERSION = "translate-page-v1"
+PROMPT_VERSION = "translate-page-v2"
 
 
 @lru_cache(maxsize=1)
 def _prompt_preamble() -> str:
-    resource = files("article_translator.prompts").joinpath("translate_page_v1.md")
+    resource = files("article_translator.prompts").joinpath("translate_page_v2.md")
     return resource.read_text(encoding="utf-8").strip()
 
 

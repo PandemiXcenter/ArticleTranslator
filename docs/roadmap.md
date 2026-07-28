@@ -1,91 +1,138 @@
 # Roadmap
 
-The architecture reserves seams for later work without installing a web
-framework, database, task queue, or speculative frontend today.
+ArticleTranslator now has a working backend, immutable editorial layer, and a
+minimal local FastAPI workbench. The remaining roadmap hardens those components
+without presenting the current loopback tool as a production, remote, or
+multi-user service.
 
 ## Phase 1 — backend contracts and local execution
 
 Implemented:
 
 - `uv` project, lockfile, package entry point, lint/type/test tooling;
-- strict TOML configuration for every non-secret setting;
+- strict TOML defaults and limits for every non-secret behavior;
 - API-key-only `.env`;
-- versioned Pydantic domain and provider payloads;
+- versioned Pydantic machine and provider payloads;
 - page-preserving MarkItDown extraction and matching PNG rendering;
 - structured Gemini image+Markdown adapter;
 - qualitative uncertain-term output;
-- per-page atomic checkpoints and safe resume;
-- canonical JSON dataset and clean Markdown compiler;
+- immutable translation runs, per-page atomic checkpoints, and safe resume;
+- canonical JSON dataset and deterministic machine Markdown compiler;
 - unit, local-integration, and fake-provider end-to-end tests.
 
-Before calling the backend production-ready:
+Still required before production claims:
 
-- exercise representative born-digital and scanned PDFs;
-- add provider error classification and telemetry without page text;
-- decide rate/cost limits and bounded concurrency;
-- add progress events;
-- add explicit cancellation and job locking;
+- verify live Gemini behavior only through an explicit, opt-in live exercise;
+- evaluate representative born-digital and scanned historical PDFs;
+- improve provider error classification and privacy-safe telemetry;
 - test very large, malformed, rotated, and password-protected PDFs;
-- decide retention/deletion policy for generated page images.
+- decide retention/deletion policy for preparations, images, and completed runs.
+
+The ordinary suite has not contacted Gemini, so live translation quality and
+provider-account behavior remain unverified.
 
 ## Phase 2 — translation quality controls
 
-- Evaluate prompt/schema output on historical Danish medical text.
-- Add reusable glossaries and document-level terminology context in TOML or
-  referenced config assets.
-- Define how neighboring-page context is supplied without losing independent
-  page checkpoints.
-- Add source-coverage and duplicate-block diagnostics as warnings, not invented
-  confidence.
-- Add opt-in schema repair with a strict attempt/cost cap.
-- Add provider adapters only when needed; the application contract stays
-  provider-neutral.
+Implemented:
+
+- strict per-page structured output with block types and qualitative
+  uncertainties;
+- configured glossary plus an authoritative per-job Term mappings table;
+- per-job input/output languages, style, and allowlisted Gemini model, with TOML
+  defaults (Danish to English in the checked-in config);
+- prompt/checkpoint versioning for translation-affecting settings.
+
+Deferred:
+
+- evaluate and tune output on a representative corpus of historical Danish
+  material;
+- reusable named glossary files and document-level terminology packages;
+- neighboring-page context that preserves independent page checkpoint semantics;
+- source-coverage and duplicate-block diagnostics;
+- opt-in schema repair with a strict attempt/cost cap;
+- additional provider adapters, added only when a concrete need exists.
 
 ## Phase 3 — editorial revision model
 
-- Introduce immutable, coexisting translation runs before storing any editorial
-  data. Retranslation starts a new run; retry stays in the same run.
-- Persist append-only `BlockRevision` records rather than overwriting machine
-  translation, scoped to document, translation run, and block.
-- Compute an effective block view from machine text plus accepted revision.
-- Support review states, editor notes, and optimistic version checks.
-- Turn uncertainty entries into a review queue with resolve/defer actions.
-- Add block split/merge and type correction while retaining provenance.
-- Make every export choose machine, latest editorial, or accepted text by policy.
-- Add revision history and reproducible re-export tests.
+Implemented:
 
-## Phase 4 — application API
+- immutable, coexisting translation runs: retry stays in a failed/in-progress
+  run, while retranslation starts a new run;
+- append-only `BlockRevision` JSON scoped to document, run, and block;
+- atomic revision creation, contiguous history validation, and optimistic base
+  versions;
+- effective review documents that retain machine text unchanged;
+- review states and service support for editor/note metadata;
+- stable uncertainty highlighting with exact offsets and structured fallback;
+- one-occurrence correction and all-occurrence correction only for multiple
+  unresolved model-annotated matches;
+- reviewed Markdown generated from latest effective revisions without mutating
+  canonical machine output;
+- revision, conflict, uncertainty, and reproducible export tests.
 
-- Add query/use-case services for jobs, pages, blocks, revisions, and progress.
-- Replace or complement filesystem persistence with a SQLite adapter after access
-  patterns are known.
-- Add background execution and cancellation only when the UI needs them.
-- Keep provider calls, prompt building, and artifact layout behind application
-  ports.
-- Add authentication/authorization before multi-user or remote deployment.
+Deferred:
 
-## Phase 5 — editor UI
+- block split/merge and block-type correction;
+- editor identity entry and a dedicated revision-history screen;
+- explicit machine/latest/accepted-only export policy selection;
+- multi-editor locking beyond optimistic conflict detection;
+- carrying corrections between translation runs, which requires an explicit
+  matching and approval design.
 
-The first UI should provide:
+## Phase 4 — local application interface
 
-- PDF page image beside source Markdown and structured translated blocks;
-- editable translated text and block type;
-- visible physical, PDF-label, and printed-page provenance;
-- uncertainty highlighting and alternatives;
-- translation settings preview before a run;
-- per-page retry and job progress;
-- filtering by unreviewed, uncertain, failed, or changed blocks;
-- accepted-revision export to clean Markdown.
+Implemented:
 
-The UI must never call Gemini directly or treat Markdown as canonical storage. It
-uses the same application services as the CLI.
+- FastAPI routes for safe public configuration, PDF upload, job progress, review
+  projection, block revision, uncertainty replacement, and Markdown download;
+- bounded background execution in one process;
+- upload size/type/name validation, opaque staging directories, cleanup, CSRF
+  checks, no-store headers, and redacted public errors;
+- strict per-job language/model/style resolution and model allowlisting;
+- optional local API-key persistence behind **Save on this computer**, with only
+  boolean key status returned to the browser;
+- application services between the HTTP layer and provider/filesystem adapters.
 
-## Explicitly deferred
+Deferred:
 
-- Pixel-perfect PDF layout reconstruction;
+- durable job registry, recovery, discovery, and queue persistence;
+- job cancellation and per-document execution locks;
+- SQLite or another database adapter after access patterns justify it;
+- multi-process workers;
+- authentication, authorization, and every remote-deployment concern.
+
+## Phase 5 — colleague web workbench
+
+Implemented:
+
+- plain tabbed Translate, Term mappings, Settings, and Review workspace;
+- laptop PDF selection and language direction on job start;
+- job progress polling;
+- authoritative source-term/required-translation rows;
+- allowlisted Gemini model, translation style, and key controls;
+- side-by-side original/effective translation blocks grouped by
+  `original_page_number`;
+- translated-pane-driven source synchronization;
+- block editing and validation backed by append-only revisions;
+- visible qualitative uncertainty details and conditional Translate One /
+  Translate All correction;
+- reviewed Markdown download.
+
+Deferred:
+
+- reopening completed jobs after a server restart;
+- cancellation and per-page retry controls in the browser;
+- filters for unreviewed, uncertain, failed, or changed blocks;
+- block type editing, split/merge, revision history, and reviewer identity UI;
+- comprehensive browser automation and cross-browser visual verification;
+- remote access or deployment.
+
+## Explicitly out of current scope
+
+- pixel-perfect PDF layout reconstruction;
 - calibrated probabilities from models that do not expose them;
 - silent partial-document compilation;
 - arbitrary raw-provider-response storage;
-- automatic source-document upload to any provider without a visible user action
-  and privacy notice;
-- framework selection for the UI before backend/editor access patterns are known.
+- automatic provider upload without an explicit user action and privacy notice;
+- a public product/landing-page presentation;
+- exposing the current unauthenticated server beyond loopback.

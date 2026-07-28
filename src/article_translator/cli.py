@@ -7,11 +7,10 @@ from typing import Annotated, Never
 import typer
 from rich.console import Console
 
-from article_translator.adapters.extraction import MarkItDownPageExtractor
-from article_translator.adapters.llm import GeminiPageTranslator
 from article_translator.adapters.storage import FilesystemArtifactRepository
 from article_translator.application.pipeline import TranslationPipeline
-from article_translator.config import ProjectConfig, SecretSettings, load_project_config
+from article_translator.composition import build_pipeline, translate_with_config
+from article_translator.config import ProjectConfig, load_project_config
 from article_translator.domain.errors import ArticleTranslatorError
 from article_translator.domain.models import DocumentTranslation
 
@@ -91,7 +90,7 @@ def translate(
     ],
     force: Annotated[
         bool,
-        typer.Option(help="Replace page checkpoints even when their fingerprints differ."),
+        typer.Option(help="Start a new immutable translation run."),
     ] = False,
 ) -> None:
     """Translate all pages, resuming matching checkpoints."""
@@ -103,7 +102,8 @@ def translate(
         _abort(exc)
     console.print(
         f"Validated [bold]{len(document.pages)}[/bold] translated pages; "
-        f"canonical dataset: {job_dir / 'output' / 'document.json'}"
+        "canonical dataset: "
+        f"{job_dir / 'runs' / document.translation_run_id / 'output' / 'document.json'}"
     )
 
 
@@ -137,7 +137,7 @@ def run(
     ],
     force: Annotated[
         bool,
-        typer.Option(help="Rebuild page artifacts and replace translation checkpoints."),
+        typer.Option(help="Rebuild page artifacts and start a new translation run."),
     ] = False,
 ) -> None:
     """Run the full backend pipeline with the selected TOML configuration."""
@@ -171,6 +171,22 @@ def show_config(context: typer.Context) -> None:
     console.print_json(runtime.config.model_dump_json(indent=2))
 
 
+@app.command()
+def serve(context: typer.Context) -> None:
+    """Run the local browser editor."""
+
+    import uvicorn
+
+    from article_translator.interfaces.web import create_app
+
+    runtime = _runtime(context)
+    uvicorn.run(
+        create_app(runtime.config),
+        host=runtime.config.web.host,
+        port=runtime.config.web.port,
+    )
+
+
 def _translate(
     config: ProjectConfig,
     job_dir: Path,
@@ -178,31 +194,11 @@ def _translate(
     force: bool,
     pipeline: TranslationPipeline | None = None,
 ) -> DocumentTranslation:
-    secret = SecretSettings().gemini_api_key
-    if secret is None:
-        raise ValueError("GEMINI_API_KEY is required in the environment or an ignored .env file")
-    gemini = config.provider.gemini
-    with GeminiPageTranslator(
-        api_key=secret.get_secret_value(),
-        model=gemini.model,
-        api_version=gemini.api_version,
-        timeout_seconds=gemini.request_timeout_seconds,
-        attempts=gemini.request_attempts,
-        max_inline_request_bytes=gemini.max_inline_request_bytes,
-    ) as translator:
-        return (pipeline or _pipeline()).translate_document(
-            job_dir,
-            settings=config.translation,
-            translator=translator,
-            force=force,
-        )
+    return translate_with_config(config, job_dir, force=force, pipeline=pipeline)
 
 
 def _pipeline() -> TranslationPipeline:
-    return TranslationPipeline(
-        extractor=MarkItDownPageExtractor(),
-        repository_factory=lambda root: FilesystemArtifactRepository(root),
-    )
+    return build_pipeline()
 
 
 def _runtime(context: typer.Context) -> RuntimeContext:

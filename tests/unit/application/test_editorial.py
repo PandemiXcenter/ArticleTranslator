@@ -1,0 +1,398 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+import pytest
+
+from article_translator.application.editorial import EditorialService
+from article_translator.domain.editorial import BlockRevision
+from article_translator.domain.enums import BlockType, ExtractionStatus
+from article_translator.domain.errors import (
+    ReplaceAllUnavailableError,
+    RevisionConflictError,
+)
+from article_translator.domain.models import (
+    ArtifactRef,
+    DocumentTranslation,
+    MarkdownExportSettings,
+    PageTranslation,
+    ProviderMetadata,
+    TranslatedBlock,
+    TranslationSettings,
+    UncertainTerm,
+)
+
+HASH = "a" * 64
+RUN_ID = "1" * 32
+
+
+class MemoryRevisionRepository:
+    def __init__(self) -> None:
+        self.revisions: dict[tuple[str, str, str], list[BlockRevision]] = {}
+
+    def list_block_revisions(
+        self,
+        document_id: str,
+        translation_run_id: str,
+        block_id: str,
+    ) -> list[BlockRevision]:
+        return list(self.revisions.get((document_id, translation_run_id, block_id), []))
+
+    def append_block_revision(self, revision: BlockRevision) -> None:
+        key = (revision.document_id, revision.translation_run_id, revision.block_id)
+        self.revisions.setdefault(key, []).append(revision)
+
+
+def _artifact(path: str, media_type: str) -> ArtifactRef:
+    return ArtifactRef(path=path, sha256=HASH, media_type=media_type, byte_count=10)
+
+
+def _block(
+    block_id: str,
+    order: int,
+    source: str,
+    translation: str,
+    *,
+    uncertain_source: str | None = None,
+    uncertain_translation: str | None = None,
+) -> TranslatedBlock:
+    uncertainties = []
+    if uncertain_source is not None:
+        uncertainties.append(
+            UncertainTerm(
+                source_term=uncertain_source,
+                proposed_translation=uncertain_translation,
+                reason="Archaic usage",
+                alternatives=["alternative"],
+            )
+        )
+    return TranslatedBlock(
+        block_id=block_id,
+        original_page_number=1,
+        order=order,
+        type=BlockType.BODY,
+        source_text=source,
+        translated_text=translation,
+        uncertainties=uncertainties,
+    )
+
+
+def _document(*blocks: TranslatedBlock) -> DocumentTranslation:
+    page_fields: dict[str, object] = {
+        "original_page_number": 1,
+        "pdf_page_label": "i",
+        "detected_printed_page_label": "1",
+        "extraction_status": ExtractionStatus.EXTRACTED,
+        "extracted_character_count": 20,
+        "source_markdown": "source",
+        "source_markdown_artifact": _artifact("prepared/source.md", "text/markdown"),
+        "source_image": _artifact("prepared/page.png", "image/png"),
+        "blocks": list(blocks),
+        "input_fingerprint": HASH,
+        "provider": ProviderMetadata(
+            provider="fake",
+            model="fake-model",
+            prompt_version="test",
+        ),
+        "translated_at": datetime(2026, 1, 1, tzinfo=UTC),
+        "translation_run_id": RUN_ID,
+    }
+    document_fields: dict[str, object] = {
+        "document_id": HASH,
+        "job_id": "job-one",
+        "source_file_name": "source.pdf",
+        "source_file_sha256": HASH,
+        "page_count": 1,
+        "translation_settings": TranslationSettings(),
+        "pages": [PageTranslation.model_validate(page_fields)],
+        "translation_run_id": RUN_ID,
+        "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+    }
+    return DocumentTranslation.model_validate(document_fields)
+
+
+def test_review_projection_keeps_source_machine_text_and_physical_page() -> None:
+    document = _document(
+        _block(
+            "p0001-b0001",
+            1,
+            "gammel og gammel",
+            "olde and olde",
+            uncertain_source="gammel",
+            uncertain_translation="olde",
+        )
+    )
+    service = EditorialService(MemoryRevisionRepository())
+
+    review = service.review_document(document, RUN_ID)
+    block = review.pages[0].blocks[0]
+
+    assert review.pages[0].original_page_number == 1
+    assert block.source_text == "gammel og gammel"
+    assert block.machine_translated_text == "olde and olde"
+    assert block.effective_translated_text == "olde and olde"
+    assert [item.uncertainty_id for item in block.uncertainty_highlights] == [
+        "p0001-b0001-u0001-o0001",
+        "p0001-b0001-u0001-o0002",
+    ]
+    assert all(item.can_replace_all for item in block.uncertainty_highlights)
+
+
+def test_highlight_offsets_are_explicit_unicode_codepoint_indexes() -> None:
+    document = _document(
+        _block(
+            "p0001-b0001",
+            1,
+            "gammel",
+            "🙂 olde",
+            uncertain_source="gammel",
+            uncertain_translation="olde",
+        )
+    )
+
+    highlight = (
+        EditorialService(MemoryRevisionRepository())
+        .review_document(
+            document,
+            RUN_ID,
+        )
+        .pages[0]
+        .blocks[0]
+        .uncertainty_highlights[0]
+    )
+
+    assert highlight.offset_unit == "unicode_codepoint"
+    assert (highlight.start_offset, highlight.end_offset) == (2, 6)
+
+
+def test_unlocated_uncertainty_is_a_structured_whole_block_fallback() -> None:
+    document = _document(
+        _block(
+            "p0001-b0001",
+            1,
+            "ukendt",
+            "rendering",
+            uncertain_source="ukendt",
+            uncertain_translation=None,
+        )
+    )
+
+    block = (
+        EditorialService(MemoryRevisionRepository())
+        .review_document(
+            document,
+            RUN_ID,
+        )
+        .pages[0]
+        .blocks[0]
+    )
+
+    assert block.uncertainty_highlights == []
+    assert len(block.uncertainty_fallbacks) == 1
+    fallback = block.uncertainty_fallbacks[0]
+    assert fallback.highlight_mode == "block"
+    assert fallback.source_term == "ukendt"
+    assert fallback.proposed_translation is None
+    assert fallback.reason == "Archaic usage"
+    assert fallback.alternatives == ["alternative"]
+
+
+def test_editorial_text_that_cannot_be_aligned_retains_uncertainty_details() -> None:
+    document = _document(
+        _block(
+            "p0001-b0001",
+            1,
+            "gammel",
+            "olde",
+            uncertain_source="gammel",
+            uncertain_translation="olde",
+        )
+    )
+    service = EditorialService(MemoryRevisionRepository())
+    service.revise_block(
+        document,
+        RUN_ID,
+        "p0001-b0001",
+        "a completely different rendering",
+        expected_base_revision=0,
+    )
+
+    block = service.review_document(document, RUN_ID).pages[0].blocks[0]
+
+    assert block.uncertainty_highlights == []
+    assert block.uncertainty_fallbacks[0].uncertainty_id.endswith("-o0001")
+    assert block.uncertainty_fallbacks[0].proposed_translation == "olde"
+    assert block.uncertainty_fallbacks[0].reason == "Archaic usage"
+
+
+def test_manual_revision_is_append_only_and_uses_optimistic_base() -> None:
+    document = _document(_block("p0001-b0001", 1, "kilde", "machine"))
+    repository = MemoryRevisionRepository()
+    service = EditorialService(repository)
+
+    revision = service.revise_block(
+        document,
+        RUN_ID,
+        "p0001-b0001",
+        "reviewed",
+        expected_base_revision=0,
+    )
+
+    assert revision.revision_number == 1
+    review = service.review_document(document, RUN_ID)
+    assert review.pages[0].blocks[0].machine_translated_text == "machine"
+    assert review.pages[0].blocks[0].effective_translated_text == "reviewed"
+    assert document.pages[0].blocks[0].translated_text == "machine"
+
+    with pytest.raises(RevisionConflictError, match="expected revision 0"):
+        service.revise_block(
+            document,
+            RUN_ID,
+            "p0001-b0001",
+            "stale edit",
+            expected_base_revision=0,
+        )
+
+
+def test_translate_all_changes_only_machine_annotated_occurrences() -> None:
+    document = _document(
+        _block(
+            "p0001-b0001",
+            1,
+            "gammel og gammel",
+            "olde and olde",
+            uncertain_source="gammel",
+            uncertain_translation="olde",
+        )
+    )
+    repository = MemoryRevisionRepository()
+    service = EditorialService(repository)
+    service.revise_block(
+        document,
+        RUN_ID,
+        "p0001-b0001",
+        "olde and olde plus olde",
+        expected_base_revision=0,
+    )
+    review = service.review_document(document, RUN_ID)
+    highlights = review.pages[0].blocks[0].uncertainty_highlights
+
+    assert len(highlights) == 2
+    revisions = service.replace_uncertainty(
+        document,
+        RUN_ID,
+        highlights[0].uncertainty_id,
+        "modern",
+        replace_all=True,
+        expected_base_revisions={"p0001-b0001": 1},
+    )
+
+    assert len(revisions) == 1
+    assert revisions[0].editorial_text == "modern and modern plus olde"
+    assert revisions[0].resolved_uncertainty_ids == [
+        "p0001-b0001-u0001-o0001",
+        "p0001-b0001-u0001-o0002",
+    ]
+
+
+def test_translate_one_removes_one_highlight_and_disables_translate_all() -> None:
+    document = _document(
+        _block(
+            "p0001-b0001",
+            1,
+            "gammel og gammel",
+            "olde and olde",
+            uncertain_source="gammel",
+            uncertain_translation="olde",
+        )
+    )
+    service = EditorialService(MemoryRevisionRepository())
+    initial = service.review_document(document, RUN_ID).pages[0].blocks[0]
+
+    service.replace_uncertainty(
+        document,
+        RUN_ID,
+        initial.uncertainty_highlights[0].uncertainty_id,
+        "modern",
+        replace_all=False,
+        expected_base_revisions={"p0001-b0001": 0},
+    )
+    current = service.review_document(document, RUN_ID).pages[0].blocks[0]
+
+    assert current.effective_translated_text == "modern and olde"
+    assert len(current.uncertainty_highlights) == 1
+    assert not current.uncertainty_highlights[0].can_replace_all
+    with pytest.raises(ReplaceAllUnavailableError, match="at least two"):
+        service.replace_uncertainty(
+            document,
+            RUN_ID,
+            current.uncertainty_highlights[0].uncertainty_id,
+            "new",
+            replace_all=True,
+            expected_base_revisions={"p0001-b0001": 1},
+        )
+
+
+def test_translate_all_can_group_matching_annotations_across_blocks() -> None:
+    document = _document(
+        _block(
+            "p0001-b0001",
+            1,
+            "gammel",
+            "olde",
+            uncertain_source="gammel",
+            uncertain_translation="olde",
+        ),
+        _block(
+            "p0001-b0002",
+            2,
+            "gammel",
+            "olde",
+            uncertain_source="gammel",
+            uncertain_translation="olde",
+        ),
+    )
+    service = EditorialService(MemoryRevisionRepository())
+    review = service.review_document(document, RUN_ID)
+    selected = review.pages[0].blocks[0].uncertainty_highlights[0]
+
+    revisions = service.replace_uncertainty(
+        document,
+        RUN_ID,
+        selected.uncertainty_id,
+        "modern",
+        replace_all=True,
+        expected_base_revisions={"p0001-b0001": 0, "p0001-b0002": 0},
+    )
+
+    assert [revision.block_id for revision in revisions] == [
+        "p0001-b0001",
+        "p0001-b0002",
+    ]
+    assert all(revision.editorial_text == "modern" for revision in revisions)
+
+
+def test_reviewed_markdown_projects_effective_text_without_mutating_machine_data() -> None:
+    document = _document(_block("p0001-b0001", 1, "kilde", "machine"))
+    service = EditorialService(MemoryRevisionRepository())
+    service.revise_block(
+        document,
+        RUN_ID,
+        "p0001-b0001",
+        "reviewed",
+        expected_base_revision=0,
+    )
+
+    markdown = service.compile_reviewed_markdown(
+        document,
+        RUN_ID,
+        MarkdownExportSettings(
+            include_page_comments=False,
+            include_headers=False,
+            include_footers=False,
+            include_page_numbers=False,
+        ),
+    )
+
+    assert markdown == "reviewed\n"
+    assert document.pages[0].blocks[0].translated_text == "machine"

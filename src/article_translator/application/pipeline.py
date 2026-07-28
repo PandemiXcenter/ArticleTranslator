@@ -42,7 +42,7 @@ RepositoryFactory = Callable[[Path], ArtifactRepository]
 
 
 class TranslationPipeline:
-    """Use cases shared by the CLI now and a future UI/API."""
+    """Provider-neutral use cases shared by the CLI and local web interface."""
 
     def __init__(
         self,
@@ -76,16 +76,16 @@ class TranslationPipeline:
             job_id = _job_id(source_pdf, source_hash)
             job_dir = (artifacts_dir / job_id).resolve()
             repository = self._repository_factory(job_dir)
+            existing_manifest = repository.read_manifest() if repository.has_manifest() else None
 
-            if repository.has_manifest() and not force:
-                existing = repository.read_manifest()
-                if existing.source_file_sha256 != source_hash:
+            if existing_manifest is not None and not force:
+                if existing_manifest.source_file_sha256 != source_hash:
                     raise ArtifactError("Existing job manifest belongs to a different source file")
-                if existing.image_dpi != image_dpi:
+                if existing_manifest.image_dpi != image_dpi:
                     raise StaleCheckpointError(
                         "Extraction image DPI changed; rerun ingestion with --force"
                     )
-                for page in existing.pages:
+                for page in existing_manifest.pages:
                     repository.resolve(page.markdown)
                     repository.resolve(page.image)
                 return job_dir
@@ -106,7 +106,13 @@ class TranslationPipeline:
                 page_count=len(pages),
                 pages=pages,
                 status=JobStatus.PREPARED,
-                created_at=now,
+                translation_run_id=None,
+                translation_run_ids=(
+                    list(existing_manifest.translation_run_ids)
+                    if existing_manifest is not None
+                    else []
+                ),
+                created_at=existing_manifest.created_at if existing_manifest is not None else now,
                 updated_at=now,
             )
             repository.write_manifest(manifest)
@@ -123,9 +129,17 @@ class TranslationPipeline:
         repository = self._repository_factory(job_dir)
         manifest = repository.read_manifest()
         descriptor = translator.descriptor
+        if force or manifest.translation_run_id is None:
+            translation_run_id = _new_translation_run_id(manifest.translation_run_ids)
+            translation_run_ids = [*manifest.translation_run_ids, translation_run_id]
+        else:
+            translation_run_id = manifest.translation_run_id
+            translation_run_ids = manifest.translation_run_ids
         manifest = manifest.model_copy(
             update={
                 "status": JobStatus.TRANSLATING,
+                "translation_run_id": translation_run_id,
+                "translation_run_ids": translation_run_ids,
                 "translation_settings": settings,
                 "provider_name": descriptor.provider,
                 "provider_model": descriptor.model,
@@ -155,12 +169,22 @@ class TranslationPipeline:
                     prompt=prompt,
                 )
 
-                if repository.has_page_translation(page.original_page_number) and not force:
-                    checkpoint = repository.read_page_translation(page.original_page_number)
+                if repository.has_page_translation(
+                    translation_run_id,
+                    page.original_page_number,
+                ):
+                    checkpoint = repository.read_page_translation(
+                        translation_run_id,
+                        page.original_page_number,
+                    )
                     retriable_failure = (
-                        repository.has_page_failure(page.original_page_number)
+                        repository.has_page_failure(
+                            translation_run_id,
+                            page.original_page_number,
+                        )
                         and repository.read_page_failure(
-                            page.original_page_number
+                            translation_run_id,
+                            page.original_page_number,
                         ).input_fingerprint
                         == fingerprint
                     )
@@ -176,8 +200,11 @@ class TranslationPipeline:
                                 "source_image": page.image,
                             }
                         )
-                        repository.write_page_translation(checkpoint)
-                        repository.clear_page_failure(page.original_page_number)
+                        repository.write_page_translation(translation_run_id, checkpoint)
+                        repository.clear_page_failure(
+                            translation_run_id,
+                            page.original_page_number,
+                        )
                         translated_pages.append(checkpoint)
                         continue
                     if checkpoint.input_fingerprint != fingerprint and not retriable_failure:
@@ -205,6 +232,7 @@ class TranslationPipeline:
                     for block in result.payload.blocks
                 ]
                 translation = PageTranslation(
+                    translation_run_id=translation_run_id,
                     original_page_number=page.original_page_number,
                     pdf_page_label=page.pdf_page_label,
                     detected_printed_page_label=result.payload.detected_printed_page_label,
@@ -227,8 +255,11 @@ class TranslationPipeline:
                         output_tokens=result.output_tokens,
                     ),
                 )
-                repository.write_page_translation(translation)
-                repository.clear_page_failure(page.original_page_number)
+                repository.write_page_translation(translation_run_id, translation)
+                repository.clear_page_failure(
+                    translation_run_id,
+                    page.original_page_number,
+                )
                 translated_pages.append(translation)
             except StaleCheckpointError:
                 self._mark_failed(repository, manifest)
@@ -236,17 +267,19 @@ class TranslationPipeline:
             except Exception as exc:
                 safe_message = _safe_error_message(exc)
                 repository.write_page_failure(
+                    translation_run_id,
                     PageFailure(
                         original_page_number=page.original_page_number,
                         input_fingerprint=fingerprint,
                         error_type=type(exc).__name__,
                         message=safe_message,
-                    )
+                    ),
                 )
                 self._mark_failed(repository, manifest)
                 raise PageTranslationError(page.original_page_number, safe_message) from exc
 
         document = DocumentTranslation(
+            translation_run_id=translation_run_id,
             document_id=manifest.document_id,
             job_id=manifest.job_id,
             source_file_name=manifest.source_file_name,
@@ -256,7 +289,7 @@ class TranslationPipeline:
             pages=translated_pages,
             created_at=manifest.created_at,
         )
-        repository.write_document(document)
+        repository.write_document(translation_run_id, document)
         manifest = manifest.model_copy(
             update={"status": JobStatus.TRANSLATED, "updated_at": utc_now()}
         )
@@ -275,9 +308,15 @@ class TranslationPipeline:
             raise IncompleteDocumentError(
                 f"Job status is {manifest.status.value!r}; complete translation before compiling"
             )
-        document = repository.read_document()
+        if manifest.translation_run_id is None:
+            raise IncompleteDocumentError("Job has no active translation run to compile")
+        translation_run_id = manifest.translation_run_id
+        document = repository.read_document(translation_run_id)
         self._validate_document_for_manifest(document, manifest)
-        output = repository.write_markdown(compile_markdown(document, settings))
+        output = repository.write_markdown(
+            translation_run_id,
+            compile_markdown(document, settings),
+        )
         manifest = manifest.model_copy(
             update={
                 "status": JobStatus.COMPILED,
@@ -349,6 +388,13 @@ class TranslationPipeline:
                 "Canonical document identity does not match the current job manifest"
             )
         if (
+            manifest.translation_run_id is None
+            or document.translation_run_id != manifest.translation_run_id
+        ):
+            raise IncompleteDocumentError(
+                "Canonical document does not belong to the active translation run"
+            )
+        if (
             manifest.translation_settings is None
             or document.translation_settings != manifest.translation_settings
         ):
@@ -372,6 +418,13 @@ class TranslationPipeline:
 def _job_id(source_pdf: Path, source_hash: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", source_pdf.stem.lower()).strip("-")
     return f"{(slug or 'document')[:48]}-{source_hash[:12]}"
+
+
+def _new_translation_run_id(existing_run_ids: list[str]) -> str:
+    run_id = uuid4().hex
+    while run_id in existing_run_ids:
+        run_id = uuid4().hex
+    return run_id
 
 
 def _prefix_artifact(reference: ArtifactRef, prefix: Path) -> ArtifactRef:

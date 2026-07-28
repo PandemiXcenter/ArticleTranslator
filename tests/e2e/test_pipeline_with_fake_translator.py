@@ -172,8 +172,12 @@ def test_full_pipeline_is_resumable_and_config_invalidates_cache(tmp_path: Path)
 
     assert translator.calls == [1, 2]
     assert [page.original_page_number for page in document.pages] == [1, 2]
+    assert all(page.translation_run_id == document.translation_run_id for page in document.pages)
     assert document.pages[0].extraction_status is ExtractionStatus.EXTRACTED
     assert document.pages[0].source_markdown_artifact.path.startswith("prepared/")
+    assert markdown_path == (
+        job_dir / "runs" / document.translation_run_id / "output" / "document.md"
+    )
     assert markdown_path.read_text(encoding="utf-8").endswith("Translated page 2\n")
 
     pipeline.translate_document(job_dir, settings=settings, translator=translator)
@@ -209,16 +213,73 @@ def test_resume_after_failure_does_not_repeat_completed_page(tmp_path: Path) -> 
     with pytest.raises(PageTranslationError, match="Page 2"):
         pipeline.translate_document(job_dir, settings=settings, translator=failing)
     assert failing.calls == [1, 2]
+    failed_manifest = FilesystemArtifactRepository(job_dir).read_manifest()
+    failed_run_id = failed_manifest.translation_run_id
+    assert failed_run_id is not None
+    assert (job_dir / "runs" / failed_run_id / "pages" / "0002" / "failure.json").is_file()
 
     resumed = FakeTranslator()
-    pipeline.translate_document(
+    document = pipeline.translate_document(
         job_dir,
         settings=settings,
         translator=resumed,
     )
 
     assert resumed.calls == [2]
-    assert not (job_dir / "pages" / "0002" / "failure.json").exists()
+    assert document.translation_run_id == failed_run_id
+    assert FilesystemArtifactRepository(job_dir).read_manifest().translation_run_id == failed_run_id
+    assert not (job_dir / "runs" / failed_run_id / "pages" / "0002" / "failure.json").exists()
+
+
+def test_forced_translations_create_coexisting_immutable_runs(tmp_path: Path) -> None:
+    pipeline, job_dir = _prepared_job(tmp_path)
+    settings = TranslationSettings()
+    translator = FakeTranslator()
+    repository = FilesystemArtifactRepository(job_dir)
+
+    first = pipeline.translate_document(
+        job_dir,
+        settings=settings,
+        translator=translator,
+        force=True,
+    )
+    first_markdown = pipeline.compile_document(
+        job_dir,
+        settings=MarkdownExportSettings(),
+    )
+    first_document_path = job_dir / "runs" / first.translation_run_id / "output" / "document.json"
+    first_page_path = (
+        job_dir / "runs" / first.translation_run_id / "pages" / "0001" / "translation.json"
+    )
+    first_document_bytes = first_document_path.read_bytes()
+    first_page_bytes = first_page_path.read_bytes()
+    first_markdown_bytes = first_markdown.read_bytes()
+
+    second = pipeline.translate_document(
+        job_dir,
+        settings=settings,
+        translator=translator,
+        force=True,
+    )
+    second_markdown = pipeline.compile_document(
+        job_dir,
+        settings=MarkdownExportSettings(),
+    )
+
+    assert translator.calls == [1, 2, 1, 2]
+    assert second.translation_run_id != first.translation_run_id
+    assert repository.read_manifest().translation_run_ids == [
+        first.translation_run_id,
+        second.translation_run_id,
+    ]
+    assert repository.read_document(first.translation_run_id) == first
+    assert repository.read_document(second.translation_run_id) == second
+    assert first_document_path.read_bytes() == first_document_bytes
+    assert first_page_path.read_bytes() == first_page_bytes
+    assert first_markdown.read_bytes() == first_markdown_bytes
+    assert second_markdown == (
+        job_dir / "runs" / second.translation_run_id / "output" / "document.md"
+    )
 
 
 def test_operational_provider_change_resumes_but_semantic_change_invalidates(
@@ -255,7 +316,7 @@ def test_operational_provider_change_resumes_but_semantic_change_invalidates(
         )
 
 
-def test_checkpoint_reuse_rebinds_current_preparation_provenance(
+def test_forced_preparation_preserves_run_index_and_starts_a_new_active_run(
     tmp_path: Path,
 ) -> None:
     pipeline, job_dir = _prepared_job(tmp_path)
@@ -267,7 +328,11 @@ def test_checkpoint_reuse_rebinds_current_preparation_provenance(
         settings=settings,
         translator=translator,
     )
+    original_run_id = original.translation_run_id
     original_source_path = original.pages[0].source_image.path
+    original_page_bytes = (
+        job_dir / "runs" / original_run_id / "pages" / "0001" / "translation.json"
+    ).read_bytes()
 
     pipeline.prepare_document(
         source,
@@ -275,15 +340,27 @@ def test_checkpoint_reuse_rebinds_current_preparation_provenance(
         image_dpi=150,
         force=True,
     )
+    prepared_manifest = FilesystemArtifactRepository(job_dir).read_manifest()
+    assert prepared_manifest.translation_run_id is None
+    assert prepared_manifest.translation_run_ids == [original_run_id]
+
     rebound = pipeline.translate_document(
         job_dir,
         settings=settings,
         translator=translator,
     )
 
-    assert translator.calls == [1, 2]
+    assert translator.calls == [1, 2, 1, 2]
+    assert rebound.translation_run_id != original_run_id
     assert rebound.pages[0].source_image.path != original_source_path
     assert FilesystemArtifactRepository(job_dir).resolve(rebound.pages[0].source_image).is_file()
+    assert (
+        job_dir / "runs" / original_run_id / "pages" / "0001" / "translation.json"
+    ).read_bytes() == original_page_bytes
+    assert FilesystemArtifactRepository(job_dir).read_manifest().translation_run_ids == [
+        original_run_id,
+        rebound.translation_run_id,
+    ]
 
 
 def test_failed_forced_preparation_does_not_corrupt_current_manifest(
@@ -325,7 +402,10 @@ def test_provider_validation_failure_does_not_persist_page_content(
             translator=InvalidOutputTranslator(),
         )
 
-    failure = FilesystemArtifactRepository(job_dir).read_page_failure(1)
+    repository = FilesystemArtifactRepository(job_dir)
+    translation_run_id = repository.read_manifest().translation_run_id
+    assert translation_run_id is not None
+    failure = repository.read_page_failure(translation_run_id, 1)
     assert "Source page 1" not in failure.message
 
 
@@ -350,15 +430,18 @@ def test_changed_config_failure_can_resume_without_repeating_new_pages(
             force=True,
         )
     assert failing.calls == [1, 2]
+    failed_run_id = FilesystemArtifactRepository(job_dir).read_manifest().translation_run_id
+    assert failed_run_id is not None
 
     resumed = FakeTranslator()
-    pipeline.translate_document(
+    resumed_document = pipeline.translate_document(
         job_dir,
         settings=changed_settings,
         translator=resumed,
     )
 
     assert resumed.calls == [2]
+    assert resumed_document.translation_run_id == failed_run_id
 
 
 def test_same_config_forced_failure_retries_the_failed_page(
@@ -381,12 +464,15 @@ def test_same_config_forced_failure_retries_the_failed_page(
             force=True,
         )
     assert failing.calls == [1, 2]
+    failed_run_id = FilesystemArtifactRepository(job_dir).read_manifest().translation_run_id
+    assert failed_run_id is not None
 
     resumed = FakeTranslator()
-    pipeline.translate_document(
+    resumed_document = pipeline.translate_document(
         job_dir,
         settings=settings,
         translator=resumed,
     )
 
     assert resumed.calls == [2]
+    assert resumed_document.translation_run_id == failed_run_id

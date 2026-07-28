@@ -4,17 +4,19 @@ These instructions apply to the entire repository.
 
 ## Mission and current scope
 
-ArticleTranslator is a backend-first, page-preserving PDF translation pipeline.
-The active architecture is:
+ArticleTranslator is a page-preserving PDF translation pipeline with a local
+FastAPI workbench for colleagues. The active architecture is:
 
 ```text
 PDF -> paired per-page Markdown + PNG -> one structured LLM call per page
-    -> canonical validated document JSON -> clean Markdown projection
+    -> canonical validated document JSON -> immutable translation run
+    -> append-only editorial revisions -> reviewed Markdown projection
 ```
 
-Maintain clean seams for a later correction/review UI, but do not add a web
-framework, frontend, database, task queue, or speculative deployment stack unless
-the task explicitly requires that phase.
+The web interface is deliberately a small loopback-only internal tool. Preserve
+its Translate, Term mappings, Settings, and Review tabs, but do not add a
+database, remote deployment stack, authentication scheme, frontend framework, or
+durable task queue unless a task explicitly expands that phase.
 
 The implementation is usable scaffolding, not a claim that live translation
 quality or production operations are complete. Never describe an untested live
@@ -28,7 +30,7 @@ provider path as verified.
 3. Inspect the nearest implementation and its tests before proposing a new
    abstraction.
 4. Identify which layer owns the change: domain, application/port, adapter,
-   composition/config, or documentation.
+   composition/config, interface, or documentation.
 5. Make the smallest coherent change in that layer and add proportional tests.
 6. Run the relevant quality gates listed below.
 7. Report changed behavior, verification performed, and anything still
@@ -44,14 +46,17 @@ config/default.toml
     Complete checked-in non-secret configuration.
 
 src/article_translator/domain/
-    Pydantic models, enums, errors, schema semantics, future editorial revisions.
+    Pydantic models, enums, errors, machine schema, editorial revisions/review
+    projections.
     Imports only the standard library and Pydantic.
 
 src/article_translator/ports/
-    Provider, extraction, and artifact Protocols. No SDK implementations.
+    Provider, extraction, artifact, and editorial-revision Protocols. No SDK or
+    web implementations.
 
 src/article_translator/application/
-    Provider-neutral orchestration, prompt assembly, fingerprints, and exporters.
+    Provider-neutral orchestration, prompt assembly, fingerprints, local job
+    lifecycle, editorial commands/queries, and exporters.
     Depends on domain and ports, never concrete infrastructure.
 
 src/article_translator/adapters/extraction/
@@ -61,13 +66,23 @@ src/article_translator/adapters/llm/
     Gemini SDK boundary. Google SDK types must not escape this package.
 
 src/article_translator/adapters/storage/
-    Filesystem artifact implementation and atomic writes.
+    Filesystem machine-artifact and append-only revision implementation.
+
+src/article_translator/adapters/secrets/
+    Narrow local `GEMINI_API_KEY` persistence. No other setting or secret.
 
 src/article_translator/prompts/
     Versioned prompt resources. Prompt behavior is part of cache identity.
 
+src/article_translator/interfaces/web/
+    FastAPI transport, strict request schemas, and small static colleague UI.
+    Calls application services; owns HTTP/CSRF/upload/presentation concerns.
+
+src/article_translator/composition.py
+    Shared wiring for CLI and web entry points.
+
 src/article_translator/cli.py
-    Composition root and command inputs only. No pipeline/business rules.
+    Command inputs and `serve` entry point only. No pipeline/business rules.
 
 tests/unit/
     Pure domain/application/config and mocked-adapter behavior.
@@ -79,13 +94,15 @@ tests/e2e/
     Full application execution with fake providers.
 ```
 
-A future UI belongs in a new interface layer and must call application services.
-It must not call Gemini/MarkItDown directly or reconstruct metadata from Markdown.
+The web UI must call application services. It must not call Gemini/MarkItDown
+directly, accept filesystem paths from the browser, or reconstruct metadata from
+Markdown.
 
 ## Non-negotiable data invariants
 
-- `output/document.json` is canonical. `output/document.md` is a reproducible
-  derivative and must never be parsed to recover metadata.
+- `runs/<translation-run-id>/output/document.json` is canonical for that
+  immutable run. Its sibling `document.md` is a reproducible derivative and must
+  never be parsed to recover metadata.
 - `original_page_number` is the 1-based physical position in the PDF.
 - `pdf_page_label` is PDF metadata. `detected_printed_page_label` is visible page
   text. A `page_number` block is retained content. Never merge these meanings.
@@ -114,14 +131,26 @@ It must not call Gemini/MarkItDown directly or reconstruct metadata from Markdow
 - Preserve Unicode and source wording. Do not apply irreversible normalization.
 - Do not invent confidence/probability values. Model uncertainty is qualitative:
   exact term, proposed rendering, reason, and alternatives.
-- Before editorial data is persisted, introduce immutable translation runs.
-  Corrections then become append-only revisions scoped to
+- Machine output and immutable translation runs already exist. Corrections are
+  append-only revisions scoped to
   `(document_id, translation_run_id, block_id)`; never attach a revision to a
   regenerated block by page/order ID alone.
+- `ReviewDocument` is an effective projection. It combines immutable machine
+  text with the latest contiguous revision history; it is not a second canonical
+  machine dataset.
+- Review synchronization uses `original_page_number`. Preserve the distinction
+  between page identity and visual scroll position; the translated pane drives
+  the read-only original pane.
+- Uncertainty replacement operates only on exact unresolved occurrences annotated
+  by the model and aligned by the editorial service. “Translate All” is available
+  only for more than one matching annotated occurrence. Never use unrestricted
+  string replacement over reviewer-authored text.
 
 ## Configuration and secrets
 
-All user-adjustable non-secret runtime settings must flow through TOML:
+All user-adjustable non-secret runtime defaults, limits, and available choices
+must flow through TOML. Explicit per-job UI selections resolve from that
+configuration rather than creating new hidden defaults:
 
 1. add or update a strict nested model in `config.py` or the appropriate domain
    settings model;
@@ -139,6 +168,21 @@ user settings, and may remain constants.
 language, style, retry, timeout, generation, export, or other non-secret settings
 there. Never place secrets in TOML, source, fixtures, manifests, logs, prompts,
 provider responses, or test snapshots.
+
+TOML owns all web defaults and limits, including loopback host/port, upload/page
+limits, bounded concurrency, status polling, default languages/style/model, and
+the selectable-model allowlist. The UI may submit explicit per-job input/output
+languages, model, style, and term mappings. Resolve those through strict request
+models and a per-job config copy, then persist the resolved non-secret run
+provenance. Do not turn them into hidden browser, Python, or environment defaults.
+
+The Settings label is **Save on this computer**. When checked, the narrow secret
+adapter writes `GEMINI_API_KEY` to the ignored local `.env`; when unchecked,
+the key remains ephemeral and is cleared from the backend job record after use.
+Never return, redisplay, prefill, log, or serialize a key. Public status endpoints
+may return booleans such as `api_key_configured` and `saved_on_computer`, never the
+secret value. Clearing the saved key must remove only `GEMINI_API_KEY` and
+preserve unrelated safe file content if such content is encountered.
 
 CLI parameters may identify an input PDF/job, select a TOML file, or authorize an
 operation such as `--force`; behavioral translation/extraction/export choices
@@ -210,14 +254,43 @@ library when adequate.
 
 ### Editorial/UI work
 
-- First add immutable, coexisting translation runs. Retranslation creates a new
-  run; retry completes the same run.
-- Add corrections as `BlockRevision`-style records scoped to document, run, and
-  block, with stable IDs and optimistic base versions.
-- Build an effective document view; retain machine text unchanged.
-- Put interface code above application services.
-- Keep exporter policy explicit: machine, latest revision, or accepted revision.
+- Preserve immutable, coexisting translation runs. Retranslation creates a new
+  run; retry completes the same failed/in-progress run.
+- Store corrections as append-only `BlockRevision` records scoped to document,
+  run, and block, with stable IDs and optimistic base versions.
+- Build the effective `ReviewDocument` through `EditorialService`; retain machine
+  text unchanged and never write corrections into `document.json`.
+- Put HTTP and browser code in `interfaces/web/` above application services.
+  Routes may compose repositories/services, but browser code must not know
+  artifact paths, provider SDK types, or prompt construction.
+- Keep the interface a compact colleague workbench. Use the existing tabs and
+  plain operational labels. Do not add hero copy, product slogans, testimonials,
+  pricing language, onboarding theater, or decorative AI-generated imagery.
+- Translate owns PDF selection and per-job language direction. Term mappings owns
+  authoritative glossary rows. Settings owns model/style and API-key handling.
+  Review owns the page-synchronized original/effective translation view,
+  validation, uncertainty correction, and reviewed Markdown download.
+- Keep only the translated review pane user-scrollable. Use
+  `original_page_number` to drive the corresponding original page and preserve
+  keyboard/focus/accessibility behavior when rerendering edited blocks.
+- Render uncertainty text from structured offsets or the structured whole-block
+  fallback. Offer one-occurrence replacement always for a range highlight and
+  all-occurrence replacement only when the API says more than one unresolved
+  annotated match exists.
+- Keep exporter policy explicit. The current reviewed download uses the latest
+  effective revision, regardless of review status; do not silently change it to
+  accepted-only behavior.
+- Treat the server as loopback-only and process-local. Do not imply that the
+  bounded thread executor is a durable queue or that browser job IDs survive a
+  restart.
 - Add concurrency/history tests before multi-editor behavior.
+
+For a web change, inspect `interfaces/web/app.py`, its strict schemas and static
+assets, `application/web_jobs.py`, `application/editorial.py`, and the matching
+tests before editing. Keep upload validation, path confinement, CSRF checks,
+no-store headers, model allowlisting, secret redaction, and staged-upload cleanup
+intact. Use fake managers/providers in tests; do not spend Gemini tokens to
+exercise the interface.
 
 ## Testing and verification
 
@@ -243,7 +316,28 @@ Use focused tests while iterating. Required coverage by change:
 - provider: mocked multimodal payload and structured response mapping;
 - pipeline: fake-provider end-to-end path, failure/resume, cache invalidation;
 - config: valid defaults, unknown-key failure, and changed behavior;
-- filesystem: atomic persistence and safe relative artifact resolution.
+- filesystem: atomic persistence and safe relative artifact resolution;
+- editorial: revision scope/history, stale-base conflicts, effective views,
+  uncertainty offset safety, one/all semantics, and reviewed export;
+- web: CSRF, upload limits/type/path confinement, per-job config resolution,
+  model allowlisting, API-key redaction/save/clear behavior, job lifecycle,
+  review commands, and reviewed download.
+
+Useful focused gate for interface/editorial work:
+
+```bash
+uv run pytest \
+  tests/unit/interfaces/web \
+  tests/unit/application/test_web_jobs.py \
+  tests/unit/application/test_editorial.py \
+  tests/unit/adapters/test_filesystem_editorial.py
+```
+
+Static UI changes also require a local non-provider smoke check of tab navigation,
+form validation, translated-pane scroll synchronization, edit controls, and the
+conditional Translate All action. If the browser runtime is unavailable, state
+that visual/browser behavior was not verified rather than substituting a live
+Gemini call.
 
 Any future live test must use `@pytest.mark.live`, be skipped unless both an
 explicit opt-in flag and key exist, and be excluded from ordinary CI/development
@@ -256,10 +350,15 @@ runs.
 - Tests generate synthetic documents in temporary directories.
 - Do not log or print keys, base64 images, full page text, or full provider
   responses.
-- A user-facing interface must disclose that the configured provider receives
+- The interface must continue to disclose that the configured provider receives
   page images and extracted text.
 - The source PDF is copied to a short-lived immutable extraction snapshot, hashed
   there, and never copied into the durable job artifact directory.
+- Browser uploads are staged under the configured artifact root, use opaque
+  server-generated directories, and are removed after the background run.
+- The local UI has no authentication. Keep `web.host` restricted by validation
+  to loopback literals until an explicit authenticated remote-deployment design
+  is approved.
 - Do not add a raw-response debug mode without an explicit retention/privacy
   design.
 

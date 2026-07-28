@@ -14,6 +14,7 @@ from article_translator.domain.models import (
 )
 
 HASH = "a" * 64
+RUN_ID = "1" * 32
 
 
 def artifact(path: str, media_type: str) -> ArtifactRef:
@@ -109,15 +110,16 @@ def test_future_revisions_are_scoped_to_an_immutable_translation_run() -> None:
     first = BlockRevision(
         revision_id="revision-1",
         document_id=HASH,
-        translation_run_id="run-1",
+        translation_run_id=RUN_ID,
         block_id="p0001-b0001",
+        revision_number=1,
         base_revision=0,
         editorial_text="First edit",
     )
     second = first.model_copy(
         update={
             "revision_id": "revision-2",
-            "translation_run_id": "run-2",
+            "translation_run_id": "2" * 32,
             "editorial_text": "Edit for a different machine run",
         }
     )
@@ -133,8 +135,34 @@ def test_future_revision_requires_run_scope_and_rejects_unknown_fields() -> None
                 "revision_id": "revision-1",
                 "document_id": HASH,
                 "block_id": "p0001-b0001",
+                "revision_number": 1,
                 "base_revision": 0,
                 "editorial_text": "Edit",
                 "page_number": 1,
             }
+        )
+
+
+def test_revision_number_must_follow_base_and_resolved_ids_are_unique() -> None:
+    with pytest.raises(ValidationError, match="exactly one greater"):
+        BlockRevision(
+            revision_id="revision-1",
+            document_id=HASH,
+            translation_run_id=RUN_ID,
+            block_id="p0001-b0001",
+            revision_number=3,
+            base_revision=1,
+            editorial_text="Edit",
+        )
+
+    with pytest.raises(ValidationError, match="must be unique"):
+        BlockRevision(
+            revision_id="revision-1",
+            document_id=HASH,
+            translation_run_id=RUN_ID,
+            block_id="p0001-b0001",
+            revision_number=1,
+            base_revision=0,
+            editorial_text="Edit",
+            resolved_uncertainty_ids=["uncertainty-1", "uncertainty-1"],
         )
