@@ -1,0 +1,38 @@
+# All non-secret behavior is configured here. Copy to `config/name.local.toml`
+# for personal settings; local configs are ignored by Git.
+config_version = 1
+
+[paths]
+artifacts_dir = "artifacts"
+
+[extraction]
+image_dpi = 150
+
+[provider]
+name = "gemini"
+
+[provider.gemini]
+# A stable multimodal model with structured-output support. Change without code.
+model = "gemini-3.6-flash"
+request_timeout_seconds = 120
+request_attempts = 3
+temperature = 0.2
+
+[translation]
+source_language = "Danish"
+target_language = "English"
+# One of: "faithful", "balanced", "readable"
+style = "balanced"
+custom_instructions = ""
+preserve_names = true
+preserve_citations = true
+mark_uncertain_terms = true
+
+# Add source-term = "preferred target rendering" pairs here.
+[translation.glossary]
+
+[export]
+include_page_comments = true
+include_headers = false
+include_footers = false
+include_page_numbers = false

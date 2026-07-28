@@ -1,0 +1,27 @@
+# uv / Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+config/*.local.toml
+
+# Source documents and generated run artifacts
+artifacts/
+data/**
+!data/README.md
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/

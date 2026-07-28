@@ -1,0 +1,1 @@
+This project aims to create a simple solution to translating old medical articles from Danish to English.
