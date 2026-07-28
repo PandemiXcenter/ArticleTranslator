@@ -1,8 +1,11 @@
-# Local source documents
+# Local PDF inputs
 
-Put development PDFs here when useful. Everything in this directory except this
-file is ignored by Git because source documents can be large, copyrighted, or
-sensitive.
+Place source PDFs here for local runs, for example:
 
-Automated tests must create synthetic PDFs in `tmp_path`; they must not depend on
-documents stored here.
+```bash
+uv run article-translator --config config/default.toml run data/article.pdf
+```
+
+PDFs in this directory are ignored by Git because they may contain private or
+copyrighted material. Automated tests generate synthetic PDFs in temporary
+directories and must not depend on files stored here.

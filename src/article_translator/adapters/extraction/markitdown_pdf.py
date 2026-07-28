@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+from typing import cast
 
 import pypdfium2 as pdfium
 from markitdown import MarkItDown, StreamInfo
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import DictionaryObject
 
 from article_translator.domain.enums import ExtractionStatus
 from article_translator.domain.errors import ArtifactError
@@ -39,10 +41,13 @@ class MarkItDownPageExtractor:
         if page_count == 0:
             raise ArtifactError("The PDF contains no pages")
 
+        page_labels: list[str | None] = [None] * page_count
         try:
-            page_labels: list[str | None] = [str(label) for label in reader.page_labels]
+            document_root = cast(DictionaryObject, reader.trailer["/Root"])
+            if "/PageLabels" in document_root:
+                page_labels = [str(label) for label in reader.page_labels]
         except Exception:  # malformed page-label metadata should not block translation
-            page_labels = [None] * page_count
+            pass
 
         pages: list[PreparedPage] = []
         with pdfium.PdfDocument(str(source_pdf)) as rendered_pdf:

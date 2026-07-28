@@ -66,6 +66,13 @@ class FilesystemArtifactRepository:
     def write_page_failure(self, failure: PageFailure) -> None:
         self._write_model(self._failure_path(failure.original_page_number), failure)
 
+    def has_page_failure(self, page_number: int) -> bool:
+        return self._failure_path(page_number).is_file()
+
+    def read_page_failure(self, page_number: int) -> PageFailure:
+        path = self._failure_path(page_number)
+        return PageFailure.model_validate_json(self._read(path))
+
     def clear_page_failure(self, page_number: int) -> None:
         self._failure_path(page_number).unlink(missing_ok=True)
 

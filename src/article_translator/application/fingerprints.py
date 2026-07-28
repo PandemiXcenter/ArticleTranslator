@@ -26,6 +26,7 @@ def page_input_fingerprint(
             "image_sha256": page.image.sha256,
             "provider": provider.provider,
             "model": provider.model,
+            "provider_semantic_configuration": dict(provider.semantic_configuration),
             "settings": settings.model_dump(mode="json"),
         }
     )

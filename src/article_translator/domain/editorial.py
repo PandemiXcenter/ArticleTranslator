@@ -4,14 +4,16 @@ from typing import Literal
 from pydantic import Field
 
 from article_translator.domain.enums import ReviewStatus
-from article_translator.domain.models import ContractModel, NonEmptyText, utc_now
+from article_translator.domain.models import ContractModel, NonEmptyText, Sha256, utc_now
 
 
 class BlockRevision(ContractModel):
-    """Future append-only correction; machine translations stay immutable."""
+    """Future append-only correction scoped to one immutable translation run."""
 
     schema_version: Literal["1.0"] = "1.0"
     revision_id: NonEmptyText
+    document_id: Sha256
+    translation_run_id: NonEmptyText
     block_id: NonEmptyText
     base_revision: int = Field(ge=0)
     editorial_text: NonEmptyText

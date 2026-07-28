@@ -1,14 +1,21 @@
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from article_translator.domain.models import GeneratedPagePayload, TranslationSettings
+from article_translator.domain.models import (
+    GeneratedPagePayload,
+    ProviderSetting,
+    TranslationSettings,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class ProviderDescriptor:
     provider: str
     model: str
+    configuration: Mapping[str, ProviderSetting] = field(default_factory=dict)
+    semantic_configuration: Mapping[str, ProviderSetting] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

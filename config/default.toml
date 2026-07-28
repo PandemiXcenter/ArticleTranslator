@@ -3,7 +3,8 @@
 config_version = 1
 
 [paths]
-artifacts_dir = "artifacts"
+# Relative paths resolve from this TOML file's directory.
+artifacts_dir = "../artifacts"
 
 [extraction]
 image_dpi = 150
@@ -14,9 +15,11 @@ name = "gemini"
 [provider.gemini]
 # A stable multimodal model with structured-output support. Change without code.
 model = "gemini-3.6-flash"
+api_version = "v1"
 request_timeout_seconds = 120
 request_attempts = 3
-temperature = 0.2
+# Conservative encoded request ceiling below Gemini's 20 MB inline-image limit.
+max_inline_request_bytes = 19000000
 
 [translation]
 source_language = "Danish"

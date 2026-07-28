@@ -22,6 +22,7 @@ from article_translator.domain.enums import (
 SCHEMA_VERSION: Literal["1.0"] = "1.0"
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+ProviderSetting = str | int | float | bool
 
 
 def utc_now() -> datetime:
@@ -144,6 +145,8 @@ class ProviderMetadata(ContractModel):
     provider: NonEmptyText
     model: NonEmptyText
     prompt_version: NonEmptyText
+    configuration: dict[str, ProviderSetting] = Field(default_factory=dict)
+    semantic_configuration: dict[str, ProviderSetting] = Field(default_factory=dict)
     response_id: str | None = None
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
@@ -169,7 +172,11 @@ class PageTranslation(ContractModel):
     original_page_number: int = Field(ge=1)
     pdf_page_label: str | None = None
     detected_printed_page_label: str | None = None
+    extraction_status: ExtractionStatus
+    extracted_character_count: int = Field(ge=0)
+    extraction_warnings: list[str] = Field(default_factory=list)
     source_markdown: str
+    source_markdown_artifact: ArtifactRef
     source_image: ArtifactRef
     blocks: list[TranslatedBlock] = Field(default_factory=list)
     input_fingerprint: Sha256
@@ -191,6 +198,7 @@ class JobManifest(ContractModel):
 
     schema_version: Literal["1.0"] = SCHEMA_VERSION
     job_id: NonEmptyText
+    preparation_id: NonEmptyText
     document_id: Sha256
     source_file_name: NonEmptyText
     source_file_sha256: Sha256
@@ -201,6 +209,8 @@ class JobManifest(ContractModel):
     translation_settings: TranslationSettings | None = None
     provider_name: str | None = None
     provider_model: str | None = None
+    provider_configuration: dict[str, ProviderSetting] | None = None
+    provider_semantic_configuration: dict[str, ProviderSetting] | None = None
     prompt_version: str | None = None
     export_settings: MarkdownExportSettings | None = None
     created_at: datetime = Field(default_factory=utc_now)
@@ -218,6 +228,7 @@ class JobManifest(ContractModel):
 class PageFailure(ContractModel):
     schema_version: Literal["1.0"] = SCHEMA_VERSION
     original_page_number: int = Field(ge=1)
+    input_fingerprint: Sha256 | None = None
     error_type: NonEmptyText
     message: NonEmptyText
     occurred_at: datetime = Field(default_factory=utc_now)

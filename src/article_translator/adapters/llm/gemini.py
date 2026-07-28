@@ -21,16 +21,21 @@ class GeminiPageTranslator:
         *,
         api_key: str,
         model: str,
-        timeout_seconds: int = 120,
-        attempts: int = 3,
-        temperature: float = 0.2,
+        api_version: str,
+        timeout_seconds: int,
+        attempts: int,
+        max_inline_request_bytes: int,
         client: Any | None = None,
     ) -> None:
         self._model = model
-        self._temperature = temperature
+        self._api_version = api_version
+        self._timeout_seconds = timeout_seconds
+        self._attempts = attempts
+        self._max_inline_request_bytes = max_inline_request_bytes
         self._client = client or genai.Client(
             api_key=api_key,
             http_options=types.HttpOptions(
+                api_version=api_version,
                 timeout=timeout_seconds * 1_000,
                 retry_options=types.HttpRetryOptions(attempts=attempts),
             ),
@@ -38,11 +43,30 @@ class GeminiPageTranslator:
 
     @property
     def descriptor(self) -> ProviderDescriptor:
-        return ProviderDescriptor(provider="gemini", model=self._model)
+        return ProviderDescriptor(
+            provider="gemini",
+            model=self._model,
+            configuration={
+                "api_version": self._api_version,
+                "request_timeout_seconds": self._timeout_seconds,
+                "request_attempts": self._attempts,
+                "max_inline_request_bytes": self._max_inline_request_bytes,
+            },
+            semantic_configuration={"api_version": self._api_version},
+        )
 
     def translate_page(self, request: PageTranslationRequest) -> ProviderResult:
+        image_bytes = request.image_path.read_bytes()
+        encoded_image_bytes = 4 * ((len(image_bytes) + 2) // 3)
+        estimated_request_bytes = encoded_image_bytes + len(request.prompt.encode("utf-8")) + 16_384
+        if estimated_request_bytes >= self._max_inline_request_bytes:
+            raise ValueError(
+                "Gemini inline request would exceed the configured byte limit; "
+                "lower extraction.image_dpi or add a File API transport"
+            )
+
         image_part = types.Part.from_bytes(
-            data=request.image_path.read_bytes(),
+            data=image_bytes,
             mime_type=request.image_media_type,
         )
         content = types.Content(
@@ -55,7 +79,6 @@ class GeminiPageTranslator:
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=GeneratedPagePayload,
-                temperature=self._temperature,
             ),
         )
 

@@ -185,9 +185,10 @@ def _translate(
     with GeminiPageTranslator(
         api_key=secret.get_secret_value(),
         model=gemini.model,
+        api_version=gemini.api_version,
         timeout_seconds=gemini.request_timeout_seconds,
         attempts=gemini.request_attempts,
-        temperature=gemini.temperature,
+        max_inline_request_bytes=gemini.max_inline_request_bytes,
     ) as translator:
         return (pipeline or _pipeline()).translate_document(
             job_dir,
