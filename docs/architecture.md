@@ -295,10 +295,15 @@ The browser interface is intentionally operational rather than promotional:
   persistence behavior.
 - **Review** renders source and effective translated blocks side by side. Only
   the translated pane is user-scrollable; its current
-  `original_page_number` drives the corresponding source page. Editing and
-  validation append revisions. Structured uncertainties are highlighted and
-  expose one/all replacement according to the service contract. Reviewed
-  Markdown is downloaded from the effective document view.
+  `original_page_number` drives the corresponding source page. The browser keeps
+  the full strict review projection indexed in memory but mounts only the active
+  page plus `web.review_context_pages` pages on each side. At a rendered boundary
+  it shifts the window while anchoring the active page and retaining unsaved
+  drafts. Generated block, uncertainty, editor, and mapping controls use stable
+  container-level delegated handlers rather than one listener per element.
+  Editing and validation append revisions. Structured uncertainties are
+  highlighted and expose one/all replacement according to the service contract.
+  Reviewed Markdown is downloaded from the effective document view.
 
 The interface does not expose artifact paths, raw provider objects, or raw
 responses. It does not parse `document.md` to rebuild pages or blocks.

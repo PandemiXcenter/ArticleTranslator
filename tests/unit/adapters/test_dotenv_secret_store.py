@@ -33,7 +33,10 @@ def test_save_creates_private_file_without_returning_secret(tmp_path: Path) -> N
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
-def test_saved_key_is_readable_by_runtime_secret_settings(tmp_path: Path) -> None:
+def test_saved_key_is_readable_by_runtime_secret_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     path = tmp_path / ".env"
     DotenvSecretStore(path).save_gemini_api_key("AIza_saved-key")
 

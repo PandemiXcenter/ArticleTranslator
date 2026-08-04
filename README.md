@@ -60,11 +60,13 @@ loopback host or port. The interface is organized as an internal workbench:
   this computer** can store it locally for later sessions. The saved value is
   never returned to or displayed by the interface.
 - **Review** shows original and translated blocks side by side. Scroll the
-  translated side; the original follows the same `original_page_number`. Edits
-  create revisions without changing machine output. Uncertain terms are visibly
-  marked and can be corrected once or, when multiple unresolved model-annotated
-  occurrences exist, all at once. The reviewed document can be downloaded as
-  Markdown.
+  translated side; the original follows the same `original_page_number`. To keep
+  long documents responsive, the browser mounts only the active page plus the
+  configured number of neighboring pages on either side (two by default), then
+  shifts that window as you scroll. Edits create revisions without changing
+  machine output. Uncertain terms are visibly marked and can be corrected once
+  or, when multiple unresolved model-annotated occurrences exist, all at once.
+  The reviewed document can be downloaded as Markdown.
 
 The configured provider receives one page image and that page's complete
 extracted Markdown for each request. Files, canonical translations, and
@@ -143,8 +145,8 @@ contains:
 - custom translator instructions and glossary;
 - name, citation, and qualitative uncertainty policies;
 - Markdown page-comment and marginalia behavior;
-- loopback web host/port, upload/page/glossary limits, status polling, and bounded
-  local concurrency.
+- loopback web host/port, upload/page/glossary limits, status polling, review-page
+  context window, and bounded local concurrency.
 
 Personal files should use `config/*.local.toml`, which Git ignores. Unknown keys,
 missing settings, invalid enum values, and out-of-range settings fail before work

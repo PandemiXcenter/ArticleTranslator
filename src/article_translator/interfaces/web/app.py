@@ -144,6 +144,7 @@ def create_app(
                 "max_glossary_entries": config.web.max_glossary_entries,
                 "max_term_characters": config.web.max_term_characters,
                 "status_poll_interval_ms": config.web.status_poll_interval_ms,
+                "review_context_pages": config.web.review_context_pages,
             },
         }
 

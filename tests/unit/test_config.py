@@ -28,6 +28,7 @@ def test_default_toml_is_the_complete_non_secret_configuration() -> None:
     assert config.web.host == "127.0.0.1"
     assert config.web.max_concurrent_jobs == 1
     assert config.web.max_pdf_pages == 500
+    assert config.web.review_context_pages == 2
 
 
 def test_unknown_config_keys_fail_fast(tmp_path: Path) -> None:
@@ -96,4 +97,18 @@ def test_web_server_rejects_non_loopback_host(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ConfigurationError, match=r"web\.host"):
+        load_project_config(path)
+
+
+def test_review_context_requires_at_least_one_neighboring_page(
+    tmp_path: Path,
+) -> None:
+    source = Path("config/default.toml").read_text(encoding="utf-8")
+    path = tmp_path / "invalid-review-window.toml"
+    path.write_text(
+        source.replace("review_context_pages = 2", "review_context_pages = 0"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match=r"web\.review_context_pages"):
         load_project_config(path)

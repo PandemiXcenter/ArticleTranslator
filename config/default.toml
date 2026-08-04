@@ -56,3 +56,5 @@ max_pdf_pages = 500
 max_glossary_entries = 500
 max_term_characters = 500
 status_poll_interval_ms = 1000
+# Render the active review page plus this many physical pages on either side.
+review_context_pages = 2

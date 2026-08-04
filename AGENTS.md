@@ -171,10 +171,11 @@ provider responses, or test snapshots.
 
 TOML owns all web defaults and limits, including loopback host/port, upload/page
 limits, bounded concurrency, status polling, default languages/style/model, and
-the selectable-model allowlist. The UI may submit explicit per-job input/output
-languages, model, style, and term mappings. Resolve those through strict request
-models and a per-job config copy, then persist the resolved non-secret run
-provenance. Do not turn them into hidden browser, Python, or environment defaults.
+the selectable-model allowlist and review context-page count. The UI may submit
+explicit per-job input/output languages, model, style, and term mappings. Resolve
+those through strict request models and a per-job config copy, then persist the
+resolved non-secret run provenance. Do not turn them into hidden browser, Python,
+or environment defaults.
 
 The Settings label is **Save on this computer**. When checked, the narrow secret
 adapter writes `GEMINI_API_KEY` to the ignored local `.env`; when unchecked,
@@ -273,6 +274,12 @@ library when adequate.
 - Keep only the translated review pane user-scrollable. Use
   `original_page_number` to drive the corresponding original page and preserve
   keyboard/focus/accessibility behavior when rerendering edited blocks.
+- Mount only the active review page and the configured number of pages on either
+  side. Shift that window at its boundaries without losing unsaved drafts, the
+  active page's viewport position, or focused editor state.
+- Delegate generated mapping-row and review-block input/click/keyboard/paste
+  events from their stable containers. Do not attach listeners per rendered
+  block, uncertainty, editor, or mapping row.
 - Render uncertainty text from structured offsets or the structured whole-block
   fallback. Offer one-occurrence replacement always for a range highlight and
   all-occurrence replacement only when the API says more than one unresolved

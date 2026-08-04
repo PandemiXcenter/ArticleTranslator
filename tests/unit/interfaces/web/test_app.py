@@ -116,6 +116,7 @@ def test_index_and_public_config_never_expose_secret(tmp_path: Path) -> None:
     assert payload["translation"]["target_language"] == "English"
     assert payload["provider"]["model"] == "gemini-3.6-flash"
     assert "gemini-3.5-flash-lite" in payload["provider"]["selectable_models"]
+    assert payload["limits"]["review_context_pages"] == 2
 
 
 def test_blank_environment_key_does_not_prevent_settings_page(
@@ -136,6 +137,37 @@ def test_blank_environment_key_does_not_prevent_settings_page(
 
     assert response.status_code == 200
     assert response.json()["api_key_configured"] is False
+
+
+def test_review_frontend_uses_a_page_window_and_delegated_handlers(
+    tmp_path: Path,
+) -> None:
+    config = configured_for_tmp(tmp_path)
+    manager = RecordingJobManager()
+    app = create_app(config, job_manager=cast(WebJobManager, manager))
+
+    with TestClient(app) as client:
+        javascript = client.get("/assets/app.js").text
+
+    assert "state.config?.limits?.review_context_pages" in javascript
+    assert "function renderReviewWindow" in javascript
+    assert "function requestReviewWindowShift" in javascript
+    assert "state.reviewDrafts.get" in javascript
+    assert 'translationContent.addEventListener("click", handleReviewClick)' in javascript
+    assert 'translationContent.addEventListener("input", handleReviewInput)' in javascript
+    assert 'translationContent.addEventListener("paste", handleReviewPaste)' in javascript
+    assert 'mappingBody.addEventListener("click", handleMappingClick)' in javascript
+
+    mapping_factory = javascript.split("function addMapping", 1)[1].split(
+        "function handleMappingClick",
+        1,
+    )[0]
+    review_factory = javascript.split("function makeTranslationBlock", 1)[1].split(
+        "function captureDrafts",
+        1,
+    )[0]
+    assert ".addEventListener" not in mapping_factory
+    assert ".addEventListener" not in review_factory
 
 
 def test_upload_requires_csrf_and_confines_hostile_filename(tmp_path: Path) -> None:

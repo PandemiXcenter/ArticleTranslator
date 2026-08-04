@@ -9,6 +9,11 @@ const state = {
   blockIndex: new Map(),
   uncertaintyIndex: new Map(),
   sourceElements: new Map(),
+  reviewPages: [],
+  reviewDrafts: new Map(),
+  reviewWindowCenter: null,
+  reviewWindowShiftFrame: null,
+  renderedPageNumbers: [],
   activeUncertaintyId: null,
   scrollFrame: null,
   sessionApiKey: "",
@@ -265,20 +270,9 @@ function addMapping(source = "", target = "", focus = true) {
   const actionCell = createElement("td");
   const remove = createElement("button", "remove-row", "×");
   remove.type = "button";
+  remove.dataset.action = "remove-mapping";
   remove.setAttribute("aria-label", source ? `Remove mapping for ${source}` : "Remove mapping");
-  remove.addEventListener("click", () => {
-    row.remove();
-    setInlineError(mappingError, "");
-    updateMappingEmptyState();
-  });
   actionCell.append(remove);
-
-  for (const input of [sourceInput, targetInput]) {
-    input.addEventListener("input", () => {
-      input.removeAttribute("aria-invalid");
-      setInlineError(mappingError, "");
-    });
-  }
 
   row.append(sourceCell, targetCell, actionCell);
   mappingBody.append(row);
@@ -286,6 +280,26 @@ function addMapping(source = "", target = "", focus = true) {
   if (focus) {
     sourceInput.focus();
   }
+}
+
+function handleMappingClick(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const remove = target?.closest("[data-action='remove-mapping']");
+  if (!remove || !mappingBody.contains(remove)) {
+    return;
+  }
+  remove.closest("tr")?.remove();
+  setInlineError(mappingError, "");
+  updateMappingEmptyState();
+}
+
+function handleMappingInput(event) {
+  const input = event.target instanceof HTMLInputElement ? event.target : null;
+  if (!input || !mappingBody.contains(input)) {
+    return;
+  }
+  input.removeAttribute("aria-invalid");
+  setInlineError(mappingError, "");
 }
 
 function normalizedGlossaryKey(value) {
@@ -844,6 +858,7 @@ function activateUncertaintyFromEvent(event, uncertaintyId) {
 function makeUncertaintyMark(text, entry) {
   const mark = createElement("mark", "uncertainty-mark", text);
   mark.dataset.testid = "uncertainty-highlight";
+  mark.dataset.action = "review-uncertainty";
   mark.dataset.uncertaintyId = asText(entry.uncertainty.uncertainty_id);
   mark.tabIndex = 0;
   mark.setAttribute("role", "button");
@@ -852,14 +867,6 @@ function makeUncertaintyMark(text, entry) {
     "aria-label",
     `Uncertain translation: ${text}. Open reviewer options.`,
   );
-  mark.addEventListener("click", (event) =>
-    activateUncertaintyFromEvent(event, entry.uncertainty.uncertainty_id),
-  );
-  mark.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") {
-      activateUncertaintyFromEvent(event, entry.uncertainty.uncertainty_id);
-    }
-  });
   return mark;
 }
 
@@ -942,10 +949,88 @@ function insertPlainTextAtSelection(editor, text) {
   selection.addRange(range);
 }
 
-function setBlockDirty(blockElement, editor, machineText) {
-  const dirty = (editor.textContent || "") !== machineText;
+function setBlockDirty(blockElement, editor, effectiveText) {
+  const dirty = (editor.textContent || "") !== effectiveText;
   blockElement.classList.toggle("is-dirty", dirty);
   editor.setAttribute("aria-invalid", "false");
+  return dirty;
+}
+
+function recordEditorDraft(editor) {
+  const blockElement = editor.closest(".translation-block");
+  const blockId = asText(blockElement?.dataset.blockId);
+  const entry = state.blockIndex.get(blockId);
+  if (!blockElement || !entry) {
+    return;
+  }
+  const editorialText = editor.textContent || "";
+  const effectiveText = asText(entry.block.effective_text, entry.block.machine_text);
+  if (setBlockDirty(blockElement, editor, effectiveText)) {
+    state.reviewDrafts.set(blockId, editorialText);
+  } else {
+    state.reviewDrafts.delete(blockId);
+  }
+}
+
+function handleReviewClick(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const actionTarget = target?.closest("[data-action]");
+  if (!actionTarget || !translationContent.contains(actionTarget)) {
+    return;
+  }
+  const action = actionTarget.dataset.action;
+  if (action === "review-uncertainty") {
+    activateUncertaintyFromEvent(event, actionTarget.dataset.uncertaintyId);
+    return;
+  }
+  if (action !== "save-block") {
+    return;
+  }
+  const blockElement = actionTarget.closest(".translation-block");
+  const blockId = asText(blockElement?.dataset.blockId);
+  const entry = state.blockIndex.get(blockId);
+  const editor = blockElement?.querySelector(".translated-editor");
+  const message = blockElement?.querySelector(".block-message");
+  if (!blockElement || !entry || !editor || !message) {
+    return;
+  }
+  const status = actionTarget.dataset.reviewStatus === "accepted" ? "accepted" : "in_review";
+  const buttons = [...blockElement.querySelectorAll("[data-action='save-block']")];
+  void saveBlock(entry.block, blockElement, editor, status, buttons, message);
+}
+
+function handleReviewKeydown(event) {
+  if (event.key !== "Enter" && event.key !== " ") {
+    return;
+  }
+  const target = event.target instanceof Element ? event.target : null;
+  const uncertainty = target?.closest("[data-action='review-uncertainty']");
+  if (!uncertainty || !translationContent.contains(uncertainty)) {
+    return;
+  }
+  if (uncertainty instanceof HTMLButtonElement) {
+    return;
+  }
+  activateUncertaintyFromEvent(event, uncertainty.dataset.uncertaintyId);
+}
+
+function handleReviewInput(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const editor = target?.closest(".translated-editor");
+  if (editor && translationContent.contains(editor)) {
+    recordEditorDraft(editor);
+  }
+}
+
+function handleReviewPaste(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const editor = target?.closest(".translated-editor");
+  if (!editor || !translationContent.contains(editor)) {
+    return;
+  }
+  event.preventDefault();
+  insertPlainTextAtSelection(editor, event.clipboardData?.getData("text/plain") || "");
+  editor.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function makeSourceBlock(block, page) {
@@ -1001,13 +1086,6 @@ function makeTranslationBlock(block, page, draftText) {
   const displayedText = draftText === undefined ? effectiveText : draftText;
   const handled = renderHighlightedText(editor, displayedText, block);
 
-  editor.addEventListener("input", () => setBlockDirty(article, editor, effectiveText));
-  editor.addEventListener("paste", (event) => {
-    event.preventDefault();
-    insertPlainTextAtSelection(editor, event.clipboardData?.getData("text/plain") || "");
-    editor.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-
   const fallbackContainer = createElement("div", "uncertainty-fallbacks");
   for (const uncertainty of unresolvedUncertainties(block)) {
     const uncertaintyId = asText(uncertainty.uncertainty_id);
@@ -1021,9 +1099,8 @@ function makeTranslationBlock(block, page, draftText) {
     );
     fallback.type = "button";
     fallback.dataset.testid = "uncertainty-highlight";
-    fallback.addEventListener("click", (event) =>
-      activateUncertaintyFromEvent(event, uncertaintyId),
-    );
+    fallback.dataset.action = "review-uncertainty";
+    fallback.dataset.uncertaintyId = uncertaintyId;
     fallbackContainer.append(fallback);
   }
 
@@ -1031,18 +1108,16 @@ function makeTranslationBlock(block, page, draftText) {
   const save = createElement("button", "block-action save-action", "Save");
   save.type = "button";
   save.dataset.testid = "save-block";
+  save.dataset.action = "save-block";
+  save.dataset.reviewStatus = "in_review";
   const validate = createElement("button", "block-action validate-action", "Validate");
   validate.type = "button";
   validate.dataset.testid = "validate-block";
+  validate.dataset.action = "save-block";
+  validate.dataset.reviewStatus = "accepted";
   const message = createElement("span", "block-message");
   message.setAttribute("role", "status");
   message.setAttribute("aria-live", "polite");
-  save.addEventListener("click", () =>
-    saveBlock(block, article, editor, "in_review", [save, validate], message),
-  );
-  validate.addEventListener("click", () =>
-    saveBlock(block, article, editor, "accepted", [save, validate], message),
-  );
   actions.append(save, validate, message);
 
   article.append(meta, editor);
@@ -1057,16 +1132,21 @@ function makeTranslationBlock(block, page, draftText) {
 }
 
 function captureDrafts() {
-  const drafts = new Map();
-  for (const blockElement of translationContent.querySelectorAll(
-    ".translation-block.is-dirty",
-  )) {
+  for (const blockElement of translationContent.querySelectorAll(".translation-block")) {
     const editor = blockElement.querySelector(".translated-editor");
-    if (editor) {
-      drafts.set(asText(blockElement.dataset.blockId), editor.textContent || "");
+    const blockId = asText(blockElement.dataset.blockId);
+    const entry = state.blockIndex.get(blockId);
+    if (!editor || !entry) {
+      continue;
+    }
+    const editorialText = editor.textContent || "";
+    if (editorialText !== asText(entry.block.effective_text, entry.block.machine_text)) {
+      state.reviewDrafts.set(blockId, editorialText);
+    } else {
+      state.reviewDrafts.delete(blockId);
     }
   }
-  return drafts;
+  return new Map(state.reviewDrafts);
 }
 
 function buildReviewIndexes(pages) {
@@ -1107,17 +1187,56 @@ function updateReviewSummary() {
       : `${validation} · no open uncertainties`;
 }
 
-function renderReview(drafts = new Map()) {
+function reviewContextPages() {
+  const configured = Number(state.config?.limits?.review_context_pages);
+  return Number.isInteger(configured) && configured >= 1 ? configured : 2;
+}
+
+function normalizedWindowCenter(requestedPageNumber) {
+  const requested = Number(requestedPageNumber);
+  const exact = state.reviewPages.find(
+    (page) => Number(page.original_page_number) === requested,
+  );
+  return Number(exact?.original_page_number || state.reviewPages[0]?.original_page_number || 1);
+}
+
+function reviewWindowPages(centerPageNumber) {
+  const center = normalizedWindowCenter(centerPageNumber);
+  const centerIndex = state.reviewPages.findIndex(
+    (page) => Number(page.original_page_number) === center,
+  );
+  const context = reviewContextPages();
+  return state.reviewPages.slice(
+    Math.max(0, centerIndex - context),
+    Math.min(state.reviewPages.length, centerIndex + context + 1),
+  );
+}
+
+function renderedPageElement(container, pageNumber) {
+  return [...container.querySelectorAll(".review-page")].find(
+    (page) => Number(page.dataset.pageNumber) === Number(pageNumber),
+  );
+}
+
+function renderReviewWindow(centerPageNumber, options = {}) {
+  if (options.captureDrafts !== false) {
+    captureDrafts();
+  }
+  if (state.scrollFrame !== null) {
+    cancelAnimationFrame(state.scrollFrame);
+    state.scrollFrame = null;
+  }
   sourceContent.replaceChildren();
   translationContent.replaceChildren();
   state.sourceElements = new Map();
-  const pages = Array.isArray(state.review?.pages)
-    ? [...state.review.pages].sort(
-        (left, right) =>
-          Number(left.original_page_number) - Number(right.original_page_number),
-      )
-    : [];
-  buildReviewIndexes(pages);
+  state.reviewWindowCenter = normalizedWindowCenter(centerPageNumber);
+  const pages = reviewWindowPages(state.reviewWindowCenter);
+  state.renderedPageNumbers = pages.map((page) => Number(page.original_page_number));
+  for (const container of [sourceContent, translationContent]) {
+    container.dataset.windowStart = asText(state.renderedPageNumbers[0]);
+    container.dataset.windowEnd = asText(state.renderedPageNumbers.at(-1));
+    container.dataset.renderedPageCount = asText(state.renderedPageNumbers.length);
+  }
 
   if (!pages.length) {
     sourceContent.append(createElement("p", "lede", "No source pages were returned."));
@@ -1138,12 +1257,61 @@ function renderReview(drafts = new Map()) {
     for (const block of Array.isArray(page.blocks) ? page.blocks : []) {
       sourcePage.append(makeSourceBlock(block, page));
       translatedPage.append(
-        makeTranslationBlock(block, page, drafts.get(asText(block.block_id))),
+        makeTranslationBlock(
+          block,
+          page,
+          state.reviewDrafts.get(asText(block.block_id)),
+        ),
       );
     }
     sourceContent.append(sourcePage);
     translationContent.append(translatedPage);
   }
+
+  if (options.resetScroll) {
+    sourceScroll.scrollTop = 0;
+    translationScroll.scrollTop = 0;
+  }
+
+  requestAnimationFrame(() => {
+    const anchorPageNumber = Number(options.anchorPageNumber);
+    if (Number.isInteger(anchorPageNumber)) {
+      const anchorPage = renderedPageElement(translationContent, anchorPageNumber);
+      if (anchorPage && Number.isFinite(options.anchorViewportOffset)) {
+        const currentOffset =
+          anchorPage.getBoundingClientRect().top -
+          translationScroll.getBoundingClientRect().top;
+        translationScroll.scrollTop += currentOffset - options.anchorViewportOffset;
+      } else if (anchorPage) {
+        translationScroll.scrollTop = elementPositionInScroller(
+          anchorPage,
+          translationScroll,
+        );
+      }
+    }
+    syncSourceToTranslation();
+    if (options.focusBlockId) {
+      const block = [...translationContent.querySelectorAll(".translation-block")].find(
+        (element) => element.dataset.blockId === asText(options.focusBlockId),
+      );
+      block?.querySelector(".translated-editor")?.focus({ preventScroll: true });
+    }
+  });
+}
+
+function renderReview(drafts = new Map(), options = {}) {
+  if (state.reviewWindowShiftFrame !== null) {
+    cancelAnimationFrame(state.reviewWindowShiftFrame);
+    state.reviewWindowShiftFrame = null;
+  }
+  state.reviewDrafts = new Map(drafts);
+  state.reviewPages = Array.isArray(state.review?.pages)
+    ? [...state.review.pages].sort(
+        (left, right) =>
+          Number(left.original_page_number) - Number(right.original_page_number),
+      )
+    : [];
+  buildReviewIndexes(state.reviewPages);
 
   const filename =
     asText(state.review?.filename) ||
@@ -1154,7 +1322,16 @@ function renderReview(drafts = new Map()) {
   document.title = `${filename} · ArticleTranslator`;
   exportLink.href = `/api/jobs/${encodeURIComponent(state.jobId)}/export.md`;
   updateReviewSummary();
-  requestAnimationFrame(syncSourceToTranslation);
+  const focusedPage = options.focusBlockId
+    ? state.blockIndex.get(asText(options.focusBlockId))?.page.original_page_number
+    : null;
+  renderReviewWindow(
+    options.centerPageNumber ||
+      focusedPage ||
+      state.reviewWindowCenter ||
+      state.reviewPages[0]?.original_page_number,
+    { ...options, captureDrafts: false },
+  );
 }
 
 function currentReviewVersion(response, oldVersion) {
@@ -1190,7 +1367,13 @@ async function saveBlock(block, blockElement, editor, status, buttons, message) 
   const oldVersion = Number(block.base_revision) || 0;
   const drafts = captureDrafts();
   drafts.delete(asText(block.block_id));
-  const savedScroll = translationScroll.scrollTop;
+  state.reviewDrafts.delete(asText(block.block_id));
+  const pageNumber = Number(blockElement.dataset.pageNumber);
+  const anchorPage = renderedPageElement(translationContent, pageNumber);
+  const anchorViewportOffset = anchorPage
+    ? anchorPage.getBoundingClientRect().top -
+      translationScroll.getBoundingClientRect().top
+    : null;
   try {
     const response = await apiRequest(
       `/api/jobs/${encodeURIComponent(state.jobId)}/revisions`,
@@ -1207,10 +1390,13 @@ async function saveBlock(block, blockElement, editor, status, buttons, message) 
     );
     if (Array.isArray(response?.pages)) {
       state.review = response;
-      renderReview(drafts);
+      renderReview(drafts, {
+        centerPageNumber: pageNumber,
+        anchorPageNumber: pageNumber,
+        anchorViewportOffset,
+        focusBlockId: block.block_id,
+      });
       requestAnimationFrame(() => {
-        translationScroll.scrollTop = savedScroll;
-        syncSourceToTranslation();
         const refreshedBlock = [
           ...translationContent.querySelectorAll(".translation-block"),
         ].find((element) => element.dataset.blockId === asText(block.block_id));
@@ -1364,7 +1550,12 @@ async function replaceUncertainty(scope) {
   for (const affected of affectedEntries) {
     drafts.delete(asText(affected.block.block_id));
   }
-  const savedScroll = translationScroll.scrollTop;
+  const pageNumber = Number(entry.page.original_page_number);
+  const anchorPage = renderedPageElement(translationContent, pageNumber);
+  const anchorViewportOffset = anchorPage
+    ? anchorPage.getBoundingClientRect().top -
+      translationScroll.getBoundingClientRect().top
+    : null;
   translateOneButton.disabled = true;
   translateAllButton.disabled = true;
   try {
@@ -1383,7 +1574,13 @@ async function replaceUncertainty(scope) {
       },
     );
     closeUncertainty();
-    await loadReview({ drafts, scrollTop: savedScroll, focusBlockId: entry.block.block_id });
+    await loadReview({
+      drafts,
+      centerPageNumber: pageNumber,
+      anchorPageNumber: pageNumber,
+      anchorViewportOffset,
+      focusBlockId: entry.block.block_id,
+    });
   } catch (error) {
     setInlineError(replacementError, error.message);
     showGlobalError(error.message);
@@ -1399,31 +1596,65 @@ async function loadReview(options = {}) {
     `/api/jobs/${encodeURIComponent(state.jobId)}/review`,
   );
   state.review = review || { pages: [] };
-  renderReview(options.drafts);
+  const hasAnchor = options.anchorPageNumber !== undefined;
+  renderReview(options.drafts instanceof Map ? options.drafts : new Map(), {
+    centerPageNumber: options.centerPageNumber,
+    anchorPageNumber: options.anchorPageNumber,
+    anchorViewportOffset: options.anchorViewportOffset,
+    focusBlockId: options.focusBlockId,
+    resetScroll: !hasAnchor,
+  });
   reviewTab.disabled = false;
   reviewTab.setAttribute("aria-disabled", "false");
   activateTab("review");
-  if (options.scrollTop !== undefined) {
-    requestAnimationFrame(() => {
-      translationScroll.scrollTop = options.scrollTop;
-      syncSourceToTranslation();
-      if (options.focusBlockId) {
-        const block = [...translationContent.querySelectorAll(".translation-block")].find(
-          (element) => element.dataset.blockId === asText(options.focusBlockId),
-        );
-        block?.querySelector(".translated-editor")?.focus({ preventScroll: true });
-      }
-    });
-  } else {
-    sourceScroll.scrollTop = 0;
-    translationScroll.scrollTop = 0;
-  }
 }
 
 function elementPositionInScroller(element, scroller) {
   const elementRect = element.getBoundingClientRect();
   const scrollerRect = scroller.getBoundingClientRect();
   return elementRect.top - scrollerRect.top + scroller.scrollTop;
+}
+
+function requestReviewWindowShift(pageNumber) {
+  if (
+    state.reviewWindowShiftFrame !== null ||
+    Number(state.reviewWindowCenter) === Number(pageNumber) ||
+    state.renderedPageNumbers.length === 0
+  ) {
+    return;
+  }
+  const firstRendered = state.renderedPageNumbers[0];
+  const lastRendered = state.renderedPageNumbers.at(-1);
+  const firstDocumentPage = Number(state.reviewPages[0]?.original_page_number);
+  const lastDocumentPage = Number(state.reviewPages.at(-1)?.original_page_number);
+  const needsEarlierPages =
+    Number(pageNumber) === firstRendered && firstRendered > firstDocumentPage;
+  const needsLaterPages =
+    Number(pageNumber) === lastRendered && lastRendered < lastDocumentPage;
+  if (!needsEarlierPages && !needsLaterPages) {
+    return;
+  }
+
+  state.reviewWindowShiftFrame = requestAnimationFrame(() => {
+    state.reviewWindowShiftFrame = null;
+    const activeEditor = document.activeElement?.closest?.(".translated-editor");
+    const focusBlockId = activeEditor
+      ? activeEditor.closest(".translation-block")?.dataset.blockId
+      : null;
+    const anchorPage = renderedPageElement(translationContent, pageNumber);
+    const anchorViewportOffset = anchorPage
+      ? anchorPage.getBoundingClientRect().top -
+        translationScroll.getBoundingClientRect().top
+      : null;
+    const drafts = captureDrafts();
+    state.reviewDrafts = drafts;
+    renderReviewWindow(pageNumber, {
+      anchorPageNumber: pageNumber,
+      anchorViewportOffset,
+      focusBlockId,
+      captureDrafts: false,
+    });
+  });
 }
 
 function syncSourceToTranslation() {
@@ -1450,6 +1681,7 @@ function syncSourceToTranslation() {
   activePageLabel.textContent = pageEntry
     ? `Physical page ${pageNumber}${pageEntry.pdf_page_label ? ` · ${pageEntry.pdf_page_label}` : ""}`
     : `Physical page ${pageNumber}`;
+  requestReviewWindowShift(Number(pageNumber));
 
   const blocks = [...activePage.querySelectorAll(".translation-block")];
   let activeBlock = blocks[0] || null;
@@ -1537,8 +1769,14 @@ async function initialize() {
 
 fileInput.addEventListener("change", () => applyFile(fileInput.files?.[0] || null));
 addMappingButton.addEventListener("click", () => addMapping());
+mappingBody.addEventListener("click", handleMappingClick);
+mappingBody.addEventListener("input", handleMappingInput);
 form.addEventListener("submit", startTranslation);
 dismissAlert.addEventListener("click", clearGlobalError);
+translationContent.addEventListener("click", handleReviewClick);
+translationContent.addEventListener("keydown", handleReviewKeydown);
+translationContent.addEventListener("input", handleReviewInput);
+translationContent.addEventListener("paste", handleReviewPaste);
 translationScroll.addEventListener("scroll", requestScrollSync, { passive: true });
 window.addEventListener("resize", requestScrollSync);
 
@@ -1569,6 +1807,23 @@ function resetForNewTranslation() {
   state.jobId = null;
   state.job = null;
   state.review = null;
+  state.blockIndex = new Map();
+  state.uncertaintyIndex = new Map();
+  state.sourceElements = new Map();
+  state.reviewPages = [];
+  state.reviewDrafts = new Map();
+  state.reviewWindowCenter = null;
+  state.renderedPageNumbers = [];
+  sourceContent.replaceChildren();
+  translationContent.replaceChildren();
+  if (state.reviewWindowShiftFrame !== null) {
+    cancelAnimationFrame(state.reviewWindowShiftFrame);
+    state.reviewWindowShiftFrame = null;
+  }
+  if (state.scrollFrame !== null) {
+    cancelAnimationFrame(state.scrollFrame);
+    state.scrollFrame = null;
+  }
   state.selectedFile = null;
   fileInput.value = "";
   const maxBytes = Number(state.config?.limits?.max_upload_bytes);

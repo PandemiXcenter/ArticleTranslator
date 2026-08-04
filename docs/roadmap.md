@@ -113,6 +113,8 @@ Implemented:
 - side-by-side original/effective translation blocks grouped by
   `original_page_number`;
 - translated-pane-driven source synchronization;
+- an active-page review window with two configurable context pages on either
+  side, draft-preserving boundary shifts, and delegated generated-control events;
 - block editing and validation backed by append-only revisions;
 - visible qualitative uncertainty details and conditional Translate One /
   Translate All correction;
