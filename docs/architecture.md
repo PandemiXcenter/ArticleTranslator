@@ -145,7 +145,9 @@ Never overload the phrase “page number”:
 Every request contains exactly one page PNG, that page's complete Markdown, and
 the fully resolved translation settings. The prompt treats Markdown as untrusted
 document content, describes all three translation styles, and uses Gemini
-structured output with the Pydantic payload schema.
+structured output with the Pydantic payload schema. The Gemini adapter sends the
+schema through the SDK's JSON Schema field and revalidates returned text locally;
+it does not depend on the legacy provider-schema field.
 
 Configured glossary entries and the per-job Term mappings table are merged into
 the resolved `TranslationSettings`. The prompt states that these source-to-target
@@ -189,6 +191,10 @@ first translation appends a UUID run ID to the manifest and makes it active.
 Each valid page is written atomically below `runs/<run-id>/` before the next
 request. A failed page gets a small run-scoped `failure.json`, the manifest
 enters `failed`, and earlier page translations remain resumable in the same run.
+Gemini SDK failures are reduced at the adapter boundary to an HTTP code, a
+validated canonical status token, and fixed operator guidance. Raw provider
+messages, response bodies, page content, and keys never enter that artifact or
+the web job status.
 Successful retry removes that page's failure artifact. Forced translation
 appends and activates a new run, leaving older successful run bytes untouched.
 

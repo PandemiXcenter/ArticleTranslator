@@ -291,6 +291,16 @@ execution. Interface tests use an in-process FastAPI client and fake job/provide
 boundaries. A future live test must be explicitly marked `live`, require an
 opt-in flag as well as a key, and remain excluded from ordinary verification.
 
+Gemini failures retain only a safe HTTP code/status and operator guidance. Raw
+provider messages, responses, page content, and keys are not written to failure
+artifacts or returned by the interface. For example, `400 INVALID_ARGUMENT`
+usually requires checking the entered key and request compatibility, `403
+PERMISSION_DENIED` requires checking key restrictions/API access, and `429
+RESOURCE_EXHAUSTED` requires checking quota or rate limits.
+
+The adapter supplies Gemini with the Pydantic contract through the SDK's current
+JSON Schema field, then validates the returned JSON locally before persistence.
+
 The live Gemini path has not been verified by the automated suite.
 
 ## Current limitations

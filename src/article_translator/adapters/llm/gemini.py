@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 from article_translator.domain.models import GeneratedPagePayload
 from article_translator.ports.translation import (
@@ -73,14 +73,17 @@ class GeminiPageTranslator:
             role="user",
             parts=[image_part, types.Part.from_text(text=request.prompt)],
         )
-        response = self._client.models.generate_content(
-            model=self._model,
-            contents=content,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=GeneratedPagePayload,
-            ),
-        )
+        try:
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=content,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_json_schema=GeneratedPagePayload.model_json_schema(),
+                ),
+            )
+        except errors.APIError as exc:
+            raise GeminiRequestError(_safe_api_error_message(exc)) from exc
 
         parsed = response.parsed
         if parsed is None:
@@ -106,3 +109,40 @@ class GeminiPageTranslator:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+
+class GeminiRequestError(ValueError):
+    """A provider failure reduced to safe, actionable public fields."""
+
+
+def _safe_api_error_message(exc: errors.APIError) -> str:
+    code = exc.code if isinstance(exc.code, int) and 100 <= exc.code <= 599 else None
+    status = exc.status if isinstance(exc.status, str) else None
+    if status is None or not status.replace("_", "").isalnum() or not status.isupper():
+        status = None
+    provider_code = " ".join(
+        part for part in (f"HTTP {code}" if code is not None else None, status) if part
+    )
+    provider_code = provider_code or "unknown provider status"
+
+    if code == 400:
+        guidance = (
+            "Re-enter the API key; if it is valid, check the selected model, API version, "
+            "and structured-output schema."
+        )
+    elif code == 401:
+        guidance = "Re-enter the API key and verify that it is active."
+    elif code == 403:
+        guidance = "Check API-key restrictions and whether the Gemini API is enabled."
+    elif code == 404:
+        guidance = "Check that the selected model is available for the configured API version."
+    elif code == 408:
+        guidance = "Retry the request or increase the configured provider timeout."
+    elif code == 429:
+        guidance = "Check Gemini quota and rate limits, then retry later."
+    elif code is not None and 500 <= code <= 599:
+        guidance = "The provider reported a server failure; retry later."
+    else:
+        guidance = "Check the provider configuration and retry."
+
+    return f"Gemini request failed ({provider_code}). {guidance}"
