@@ -59,13 +59,19 @@ The server boundary is intentionally small:
 4. The browser polls process-local progress. A ready job can be projected through
    `EditorialService` for review, revisions, uncertainty replacement, and
    reviewed Markdown download.
-5. The staged upload and any ephemeral backend key are discarded after the
+5. `GET /api/jobs` lists every validated completed translation run discovered
+   under the configured artifact root. Completed-run routes accept the stable
+   translation-run ID rather than requiring the browser alias created at upload.
+6. The staged upload and any ephemeral backend key are discarded after the
    background run. Durable artifacts remain under the configured artifact root.
 
-The manager, queue, progress records, and browser job IDs exist only in one
-server process. Restarting the server loses those handles. Completed machine
-artifacts and revisions remain on disk, but there is no job discovery screen yet.
-The server has no authentication, durable queue, cancellation, multi-process
+The manager scans canonical manifests and completed `document.json` artifacts at
+startup and rebuilds the Review catalog. A completed run can therefore be opened
+by its stable translation-run ID after either the browser or server restarts. The
+submission-time browser alias, executor queue, in-progress state, and progress
+record still exist only in one server process and are lost on restart. Completed
+run discovery does not make that executor a durable queue and does not introduce
+a database. The server has no authentication, cancellation, multi-process
 coordination, or remote deployment contract. `WebConfig.host` accepts loopback
 addresses only.
 
@@ -104,11 +110,12 @@ The language model owns only fields it can observe or infer:
 ```text
 block reading order
 block type
-source-text segmentation
-translated text
+translated-region source-text segmentation and translated text
 heading level
 visibly printed page label
 qualitative uncertainty terms/reasons/alternatives
+segment continuation and classification-review flags
+target-language GFM structure for tagged tables in the second pass
 ```
 
 The pipeline owns trusted provenance:
@@ -120,14 +127,17 @@ block IDs
 PDF page-label metadata
 artifact paths and hashes
 provider/model and response identity
-prompt/schema versions
+main/table prompt and schema versions
 token usage and timestamps
-checkpoint fingerprint
+first-pass and optional table-pass fingerprints
 ```
 
 The provider-facing `GeneratedPagePayload` is intentionally smaller than
 `PageTranslation`. Pydantic forbids unknown fields and validates contiguous block
-order before the application adds trusted metadata.
+order before the application adds trusted metadata. The separate
+`GeneratedTablePayload` contains exactly one result for each tagged current-page
+table order. It cannot provide trusted identity or claim exact cell-level source
+text.
 
 ## Page-number meanings
 
@@ -142,12 +152,20 @@ Never overload the phrase “page number”:
 
 ## Translation and uncertainty
 
-Every request contains exactly one page PNG, that page's complete Markdown, and
-the fully resolved translation settings. The prompt treats Markdown as untrusted
-document content, describes all three translation styles, and uses Gemini
-structured output with the Pydantic payload schema. The Gemini adapter sends the
-schema through the SDK's JSON Schema field and revalidates returned text locally;
-it does not depend on the legacy provider-schema field.
+Every request contains exactly one current-page PNG, that page's complete
+Markdown, and the fully resolved translation settings. The primary pass uses
+`translate-page-v4`. When that pass tags at least one table or table-like region,
+the pipeline immediately makes one additional batched request for that page using
+`reconstruct-tables-v1`; it sends the same PNG and complete page MarkItDown/OCR,
+plus the first-pass segmentation and exact table targets. Multiple table regions
+on one page do not create multiple follow-ups.
+
+Both prompts treat delimited material as untrusted document data and use Gemini
+structured output with their respective Pydantic payload schemas. The Gemini
+adapter sends each schema through the SDK's JSON Schema field and revalidates
+returned text locally; it does not depend on the legacy provider-schema field.
+The ordinary suite mocks both calls; neither the live primary request nor the
+live table follow-up has been verified against a Gemini account.
 
 Configured glossary entries and the per-job Term mappings table are merged into
 the resolved `TranslationSettings`. The prompt states that these source-to-target
@@ -155,6 +173,63 @@ mappings are authoritative; they are not suggestions inferred by the model.
 Input language, output language, model, and style can be selected for one web
 job. Their initial values and the selectable model allowlist come from TOML, and
 the resolved values participate in run provenance and checkpoint identity.
+
+### Previous-page continuity context
+
+`translation.previous_page_context_count` selects 0–10 finalized preceding pages
+from the same translation run; the checked-in default is 2. Both the primary and
+table prompts receive the same read-only projection. It contains physical page
+identity, labels, and ordered block type/source/machine translation/segment
+metadata. It deliberately excludes previous page images, editorial revisions,
+provider metadata, block IDs, hashes, token counts, and timestamps. The current
+page's full image and Markdown remain the only raw page evidence in each request.
+
+The projection is visibly delimited and the prompt requires current-page-only
+output: prior content must not be repeated, revised, or moved. This supports
+current-page interpretation of split words, sentences, terminology, headings,
+footnotes, and continued tables. It cannot retroactively revise a trailing
+fragment already persisted on a previous page. Because prior finalized output is
+embedded in the exact prompt, context content and window size participate in
+checkpoint identity while page artifacts remain independently serializable and
+resumable.
+
+### Historical-page segment policy
+
+The structured response preserves one ordered block for each meaningful page
+region. A table or table-like region is a region whose meaning depends on
+two-dimensional row and column alignment. This includes ruled tables as well as
+unruled schedules, registers, matrices, statistical arrays, and aligned date,
+age, month, or count series. Ordinary prose laid out in columns is not a table.
+
+The primary pass must not transcribe or translate the cells of a table or
+table-like region. It emits an ordered text-free tag with the applicable reason
+and continuation metadata instead. This decision is regional, not page-wide:
+prose, headings, captions, and table notes surrounding the table are separate
+translated blocks in their actual reading order.
+
+The dedicated follow-up returns target-language GitHub-flavored Markdown for
+every tag on that page. It may use bounded structural modernization to infer
+strongly supported headers, fill down implied labels, expand ditto marks and
+shorthand, transpose/reorder columns, or turn sentence-like records into modern
+rows. That flexibility never permits inventing or changing facts, totals, names,
+units, dates, categories, or rows. Unreadable values remain explicit and
+qualitative uncertainties remain structured. Each completed table block has
+`segment_handling="table_reconstruction"`, retains its tag reason and
+continuation, contains machine Markdown in `translated_text`, and leaves
+`source_text` null because it is not represented as an exact cell transcription.
+A continued table still produces one page-local table per physical page.
+
+Figures are not sent through the table follow-up. They remain ordered, text-free
+manual-insertion blocks for the reviewer.
+
+Footnotes are classified by their document function rather than by position,
+font size, marker presence, or proportion of the page. A footnote can be short,
+fill most or all of a page, or continue without repeating its marker. Footnote
+blocks remain translated content and carry an optional printed marker plus an
+explicit continuation state; ambiguous relationships are marked for
+classification review instead of being guessed. Running headers, page numbers,
+catchwords, digitizer watermarks, and printer gathering signatures are kept out
+of the footnote category.
 
 Uncertainty is not a confidence probability. The initial contract records:
 
@@ -177,26 +252,41 @@ offset.
 
 ## Checkpoints and failure behavior
 
-The page fingerprint includes:
+The primary page fingerprint includes:
 
 - Markdown artifact hash;
 - image artifact hash;
 - complete translation-settings snapshot;
 - provider, model, and output-affecting semantic provider configuration;
-- actual prompt hash and semantic prompt version;
+- actual main prompt hash, including the selected previous-page projection;
+- main prompt version plus the table prompt contract hash/version;
 - persisted schema version.
 
+The optional table-pass fingerprint includes the same source/settings/provider
+inputs, its exact prompt, the primary fingerprint, and the ordered table-target
+contract. `ProviderMetadata` on the page records primary prompt/response/token
+provenance; `TableReconstructionMetadata` records the second prompt version,
+response/tokens, target block IDs, timestamp, and table fingerprint.
+
 Any change invalidates reuse. Without `--force`, stale data stops visibly. The
-first translation appends a UUID run ID to the manifest and makes it active.
-Each valid page is written atomically below `runs/<run-id>/` before the next
-request. A failed page gets a small run-scoped `failure.json`, the manifest
-enters `failed`, and earlier page translations remain resumable in the same run.
-Gemini SDK failures are reduced at the adapter boundary to an HTTP code, a
-validated canonical status token, and fixed operator guidance. Raw provider
-messages, response bodies, page content, and keys never enter that artifact or
-the web job status.
-Successful retry removes that page's failure artifact. Forced translation
-appends and activates a new run, leaving older successful run bytes untouched.
+first translation appends a UUID run ID to the manifest and makes it active. A
+validated primary result is written atomically to the page's `translation.json`
+before a required table call. While it contains current-schema table tags it is
+an intermediate stage checkpoint and cannot enter the completed document. The
+completed table pass atomically replaces it with reconstructed blocks and
+second-pass provenance.
+
+If table reconstruction fails, the page's `failure.json` records stage
+`table_reconstruction`; retry reads the matching intermediate
+`translation.json` and repeats only pass two. It does not rerun or potentially
+change the first-pass segmentation. Other page failures use stage
+`page_translation`. In either case the manifest enters `failed` and earlier
+finalized pages remain resumable in the same run. Gemini SDK failures are reduced
+at the adapter boundary to an HTTP code, a validated canonical status token, and
+fixed operator guidance. Raw provider messages, response bodies, page content,
+and keys never enter that artifact or the web job status. Successful retry
+removes the page failure artifact. Forced translation appends and activates a new
+run, leaving older successful run bytes untouched.
 
 Operational provider settings such as timeouts, retries, and the inline-size
 guard are retained as page/manifest provenance but do not invalidate already
@@ -211,12 +301,19 @@ There is intentionally no silent partial-success mode.
 
 `runs/<run-id>/output/document.json` contains ordered `PageTranslation` records,
 including the shared translation-run ID, page source Markdown, and immutable
-machine-produced blocks.
+machine-produced blocks. Translated text regions retain source and machine text.
+Reconstructed table and table-like regions retain their ordered tag metadata,
+machine target-language GFM Markdown, and distinct table-pass provenance. Their
+`source_text` remains null so the dataset does not claim an unreliable exact
+cell transcription. Figure regions retain ordered, text-free manual-insertion
+placeholders.
 
 `runs/<run-id>/output/document.md`:
 
 - emits invisible physical-page comments when configured;
 - renders titles/headings/lists/quotes/captions/footnotes logically;
+- emits reconstructed GFM tables as machine content and placeholders only for
+  remaining manual figures or migrated legacy manual tables;
 - hides headers, footers, and printed page numbers by default;
 - is byte-stable for the same canonical document and export config.
 
@@ -235,7 +332,10 @@ The local interface uses those settings as defaults and limits. Explicit
 per-job language, model, style, and term-mapping inputs are validated at the HTTP
 boundary and applied to a copied runtime config. The default Gemini model must be
 present in `selectable_models`; the interface rejects any model outside that
-allowlist.
+allowlist. `translation.previous_page_context_count` is a required TOML setting
+bounded from 0 through 10 and defaults to 2 in the checked-in file. Its resolved
+value is persisted with the translation settings and participates in the prompt
+and checkpoint fingerprint.
 
 `.env` contains only `GEMINI_API_KEY`. The Settings interface labels persistence
 as **Save on this computer**. Checked persistence writes the key through a narrow
@@ -284,6 +384,16 @@ scope, filenames, and contiguous base/revision numbers. `EditorialService`
 projects a strict `ReviewDocument` by combining immutable machine text with the
 latest valid revision for each block.
 
+Review navigation is stored independently at:
+
+```text
+runs/<translation-run-id>/review/position.json
+```
+
+This small mutable sidecar contains the document/run scope, the latest
+`original_page_number` visited, and its timestamp. It drives **Continue from page
+X** but is not canonical translation data and is not revision history.
+
 The reviewed Markdown route compiles this effective view without changing
 `runs/<run-id>/output/document.json` or its machine `document.md`. The current
 policy uses the latest effective revision whether its status is `in_review`,
@@ -299,44 +409,54 @@ The browser interface is intentionally operational rather than promotional:
   for the next job.
 - **Settings** selects an allowlisted Gemini model, translation style, and key
   persistence behavior.
-- **Review** renders source and effective translated blocks side by side. Only
-  the translated pane is user-scrollable; its current
-  `original_page_number` drives the corresponding source page. The browser keeps
-  the full strict review projection indexed in memory but mounts only the active
-  page plus `web.review_context_pages` pages on each side. At a rendered boundary
-  it shifts the window while anchoring the active page and retaining unsaved
-  drafts. Generated block, uncertainty, editor, and mapping controls use stable
-  container-level delegated handlers rather than one listener per element.
-  Editing and validation append revisions. Structured uncertainties are
-  highlighted and expose one/all replacement according to the service contract.
-  Reviewed Markdown is downloaded from the effective document view.
+- **Review** first presents the filesystem-backed catalog of completed runs.
+  Selecting one uses its stable translation-run ID, loads the complete strict
+  review projection, and mounts the full translated document. Only the translated
+  pane is user-scrollable. Its current `original_page_number` fetches and displays
+  that one physical page's original PNG; the browser does not mount every source
+  image. The current page is persisted in the run-scoped position sidecar so a
+  later session can continue there. Generated block, uncertainty, editor, and
+  mapping controls use stable container-level delegated handlers rather than one
+  listener per element. Each block distinguishes immutable machine translation
+  from the latest append-only manual revision. Editing and validation append
+  revisions. Structured uncertainties are highlighted and expose one/all
+  replacement according to the service contract. Reviewed Markdown is downloaded
+  from the effective document view.
 
 The interface does not expose artifact paths, raw provider objects, or raw
 responses. It does not parse `document.md` to rebuild pages or blocks.
 
 ## Deliberate extension points
 
-- New LLM: implement `PageTranslator`; keep the generated payload unchanged when
-  possible.
+- New LLM: implement both `PageTranslator` methods and keep the primary/table
+  generated payloads unchanged when possible.
 - New persistence: implement `ArtifactRepository`.
 - New revision persistence: implement `RevisionRepository` and preserve
   append-only/optimistic semantics.
 - Improved extraction/rendering: implement `PageExtractor` and keep the 1:1 page
   invariant.
 - New export format: project `DocumentTranslation`; do not parse Markdown.
-- Durable/multi-process jobs: replace the process-local manager behind an
-  application port, then add discovery, cancellation, locking, and recovery
-  semantics before changing the interface.
+- Durable/multi-process execution: replace the process-local submission manager
+  behind an application port, then add in-progress recovery, cancellation,
+  locking, and queue semantics. The existing completed-run catalog is filesystem
+  discovery and does not provide those guarantees.
 - Remote use: design authentication, authorization, CSRF/origin policy, encrypted
   secret storage, retention, and deployment explicitly before allowing a
   non-loopback host.
-- Cross-page context: explicitly version and fingerprint any neighboring context;
-  never silently change the one-page request contract.
+- Broader or forward-looking cross-page context: preserve current-page-only raw
+  evidence and output, explicitly version/fingerprint the new projection, and
+  design how a future page could safely revise an already finalized prior page.
 - Schema evolution: bump `SCHEMA_VERSION` and provide migration or clear
   incompatibility handling.
-- Prompt evolution: update the prompt resource, bump `PROMPT_VERSION`, and add
-  checkpoint-invalidation tests.
+- Prompt evolution: update the applicable resource, bump `PROMPT_VERSION` and/or
+  `TABLE_PROMPT_VERSION`, and add checkpoint-invalidation tests.
 
-Core persisted artifacts use schema version 2.0 because translation-run identity
-is required at every page/document boundary. Version 1.0 manifests and
-translations are rejected explicitly; no run identity is inferred for them.
+New core persisted artifacts use schema version 4.0 because reconstructed-table
+handling and per-pass provenance are canonical. Filesystem reads apply explicit
+in-memory schema 2.0 and 3.0 compatibility migrations without rewriting immutable
+artifacts. Schema 2.0 translated tables remain marked as legacy translated
+tables; schema 3.0 manual table placeholders remain marked as legacy manual
+tables. Neither is presented as a schema 4.0 reconstruction or automatically
+sent through the new follow-up. Translated figures are rejected because they were
+never valid schema 2.0 blocks. Version 1.0 manifests and translations remain
+rejected; no run identity is inferred for them.

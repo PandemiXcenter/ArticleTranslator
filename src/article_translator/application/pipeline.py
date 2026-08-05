@@ -11,9 +11,17 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from article_translator.application.compile_markdown import compile_markdown
-from article_translator.application.fingerprints import page_input_fingerprint
-from article_translator.application.prompting import PROMPT_VERSION, build_page_prompt
-from article_translator.domain.enums import JobStatus
+from article_translator.application.fingerprints import (
+    page_input_fingerprint,
+    table_input_fingerprint,
+)
+from article_translator.application.prompting import (
+    PROMPT_VERSION,
+    TABLE_PROMPT_VERSION,
+    build_page_prompt,
+    build_table_prompt,
+)
+from article_translator.domain.enums import BlockType, JobStatus, SegmentHandling
 from article_translator.domain.errors import (
     ArtifactError,
     IncompleteDocumentError,
@@ -23,12 +31,17 @@ from article_translator.domain.errors import (
 from article_translator.domain.models import (
     ArtifactRef,
     DocumentTranslation,
+    GeneratedBlockVariant,
+    GeneratedFootnoteBlock,
+    GeneratedManualInsertionBlock,
+    GeneratedTableMarkdown,
     JobManifest,
     MarkdownExportSettings,
     PageFailure,
     PageTranslation,
     PreparedPage,
     ProviderMetadata,
+    TableReconstructionMetadata,
     TranslatedBlock,
     TranslationSettings,
     utc_now,
@@ -36,7 +49,12 @@ from article_translator.domain.models import (
 from article_translator.hashing import sha256_file
 from article_translator.ports.artifacts import ArtifactRepository
 from article_translator.ports.extraction import PageExtractor
-from article_translator.ports.translation import PageTranslationRequest, PageTranslator
+from article_translator.ports.translation import (
+    PageTranslationRequest,
+    PageTranslator,
+    ProviderDescriptor,
+    TableReconstructionRequest,
+)
 
 RepositoryFactory = Callable[[Path], ArtifactRepository]
 
@@ -146,6 +164,7 @@ class TranslationPipeline:
                 "provider_configuration": dict(descriptor.configuration),
                 "provider_semantic_configuration": dict(descriptor.semantic_configuration),
                 "prompt_version": PROMPT_VERSION,
+                "table_prompt_version": TABLE_PROMPT_VERSION,
                 "updated_at": utc_now(),
             }
         )
@@ -154,6 +173,7 @@ class TranslationPipeline:
         translated_pages: list[PageTranslation] = []
         for page in manifest.pages:
             fingerprint: str | None = None
+            failure_stage = "page_translation"
             try:
                 markdown = repository.read_text(page.markdown)
                 image_path = repository.resolve(page.image)
@@ -161,6 +181,7 @@ class TranslationPipeline:
                     page_number=page.original_page_number,
                     markdown=markdown,
                     settings=settings,
+                    previous_pages=translated_pages,
                 )
                 fingerprint = page_input_fingerprint(
                     page=page,
@@ -169,6 +190,7 @@ class TranslationPipeline:
                     prompt=prompt,
                 )
 
+                translation: PageTranslation | None = None
                 if repository.has_page_translation(
                     translation_run_id,
                     page.original_page_number,
@@ -177,84 +199,110 @@ class TranslationPipeline:
                         translation_run_id,
                         page.original_page_number,
                     )
-                    retriable_failure = (
-                        repository.has_page_failure(
-                            translation_run_id,
-                            page.original_page_number,
-                        )
-                        and repository.read_page_failure(
-                            translation_run_id,
-                            page.original_page_number,
-                        ).input_fingerprint
-                        == fingerprint
-                    )
-                    if checkpoint.input_fingerprint == fingerprint and not retriable_failure:
-                        checkpoint = checkpoint.model_copy(
-                            update={
-                                "pdf_page_label": page.pdf_page_label,
-                                "extraction_status": page.extraction_status,
-                                "extracted_character_count": (page.extracted_character_count),
-                                "extraction_warnings": page.extraction_warnings,
-                                "source_markdown": markdown,
-                                "source_markdown_artifact": page.markdown,
-                                "source_image": page.image,
-                            }
-                        )
-                        repository.write_page_translation(translation_run_id, checkpoint)
-                        repository.clear_page_failure(
-                            translation_run_id,
-                            page.original_page_number,
-                        )
-                        translated_pages.append(checkpoint)
-                        continue
-                    if checkpoint.input_fingerprint != fingerprint and not retriable_failure:
+                    if checkpoint.input_fingerprint != fingerprint:
                         raise StaleCheckpointError(
                             f"Page {page.original_page_number} has a checkpoint from different "
                             "inputs, config, prompt, provider, or model; rerun with --force"
                         )
+                    translation = _refresh_page_evidence(checkpoint, page, markdown)
+                    if not _pending_table_blocks(translation):
+                        _validate_completed_table_checkpoint(
+                            translation=translation,
+                            page=page,
+                            markdown=markdown,
+                            settings=settings,
+                            descriptor=descriptor,
+                            previous_pages=translated_pages,
+                        )
+                        repository.write_page_translation(translation_run_id, translation)
+                        repository.clear_page_failure(
+                            translation_run_id,
+                            page.original_page_number,
+                        )
+                        translated_pages.append(translation)
+                        continue
 
-                result = translator.translate_page(
-                    PageTranslationRequest(
+                if translation is None:
+                    result = translator.translate_page(
+                        PageTranslationRequest(
+                            original_page_number=page.original_page_number,
+                            markdown=markdown,
+                            image_path=image_path,
+                            image_media_type=page.image.media_type,
+                            prompt=prompt,
+                            settings=settings,
+                        )
+                    )
+                    blocks = [
+                        _to_translated_block(page.original_page_number, block)
+                        for block in result.payload.blocks
+                    ]
+                    translation = PageTranslation(
+                        translation_run_id=translation_run_id,
                         original_page_number=page.original_page_number,
+                        pdf_page_label=page.pdf_page_label,
+                        detected_printed_page_label=result.payload.detected_printed_page_label,
+                        extraction_status=page.extraction_status,
+                        extracted_character_count=page.extracted_character_count,
+                        extraction_warnings=page.extraction_warnings,
+                        source_markdown=markdown,
+                        source_markdown_artifact=page.markdown,
+                        source_image=page.image,
+                        blocks=blocks,
+                        input_fingerprint=fingerprint,
+                        provider=ProviderMetadata(
+                            provider=descriptor.provider,
+                            model=descriptor.model,
+                            prompt_version=PROMPT_VERSION,
+                            configuration=dict(descriptor.configuration),
+                            semantic_configuration=dict(descriptor.semantic_configuration),
+                            response_id=result.response_id,
+                            input_tokens=result.input_tokens,
+                            output_tokens=result.output_tokens,
+                        ),
+                    )
+                    # The first-pass result is a durable stage checkpoint. If the
+                    # table call fails, resume starts here instead of paying for
+                    # and potentially changing the page segmentation again.
+                    repository.write_page_translation(translation_run_id, translation)
+
+                table_blocks = _pending_table_blocks(translation)
+                if table_blocks:
+                    failure_stage = "table_reconstruction"
+                    table_prompt = build_table_prompt(
+                        page_translation=translation,
                         markdown=markdown,
-                        image_path=image_path,
-                        image_media_type=page.image.media_type,
-                        prompt=prompt,
                         settings=settings,
+                        previous_pages=translated_pages,
                     )
-                )
-                blocks = [
-                    TranslatedBlock(
-                        block_id=(f"p{page.original_page_number:04d}-b{block.order:04d}"),
-                        original_page_number=page.original_page_number,
-                        **block.model_dump(),
+                    fingerprint = table_input_fingerprint(
+                        page=page,
+                        settings=settings,
+                        provider=descriptor,
+                        prompt=table_prompt,
+                        first_pass_fingerprint=translation.input_fingerprint,
+                        table_blocks=table_blocks,
                     )
-                    for block in result.payload.blocks
-                ]
-                translation = PageTranslation(
-                    translation_run_id=translation_run_id,
-                    original_page_number=page.original_page_number,
-                    pdf_page_label=page.pdf_page_label,
-                    detected_printed_page_label=result.payload.detected_printed_page_label,
-                    extraction_status=page.extraction_status,
-                    extracted_character_count=page.extracted_character_count,
-                    extraction_warnings=page.extraction_warnings,
-                    source_markdown=markdown,
-                    source_markdown_artifact=page.markdown,
-                    source_image=page.image,
-                    blocks=blocks,
-                    input_fingerprint=fingerprint,
-                    provider=ProviderMetadata(
-                        provider=descriptor.provider,
-                        model=descriptor.model,
-                        prompt_version=PROMPT_VERSION,
-                        configuration=dict(descriptor.configuration),
-                        semantic_configuration=dict(descriptor.semantic_configuration),
-                        response_id=result.response_id,
-                        input_tokens=result.input_tokens,
-                        output_tokens=result.output_tokens,
-                    ),
-                )
+                    table_result = translator.reconstruct_tables(
+                        TableReconstructionRequest(
+                            original_page_number=page.original_page_number,
+                            markdown=markdown,
+                            image_path=image_path,
+                            image_media_type=page.image.media_type,
+                            prompt=table_prompt,
+                            settings=settings,
+                            expected_block_orders=tuple(block.order for block in table_blocks),
+                        )
+                    )
+                    translation = _apply_table_reconstruction(
+                        translation,
+                        table_result.payload.tables,
+                        table_fingerprint=fingerprint,
+                        descriptor=descriptor,
+                        response_id=table_result.response_id,
+                        input_tokens=table_result.input_tokens,
+                        output_tokens=table_result.output_tokens,
+                    )
                 repository.write_page_translation(translation_run_id, translation)
                 repository.clear_page_failure(
                     translation_run_id,
@@ -271,6 +319,7 @@ class TranslationPipeline:
                     PageFailure(
                         original_page_number=page.original_page_number,
                         input_fingerprint=fingerprint,
+                        stage=failure_stage,
                         error_type=type(exc).__name__,
                         message=safe_message,
                     ),
@@ -413,6 +462,214 @@ class TranslationPipeline:
                 raise IncompleteDocumentError(
                     "Canonical page provenance does not match the current job manifest"
                 )
+            table_metadata = page.table_reconstruction
+            if table_metadata is not None and (
+                manifest.table_prompt_version is None
+                or table_metadata.provider.prompt_version != manifest.table_prompt_version
+                or table_metadata.provider.provider != manifest.provider_name
+                or table_metadata.provider.model != manifest.provider_model
+                or table_metadata.provider.semantic_configuration
+                != (manifest.provider_semantic_configuration or {})
+            ):
+                raise IncompleteDocumentError(
+                    "Canonical table-pass provenance does not match the current job manifest"
+                )
+
+
+def _to_translated_block(
+    original_page_number: int,
+    block: GeneratedBlockVariant,
+) -> TranslatedBlock:
+    block_id = f"p{original_page_number:04d}-b{block.order:04d}"
+    if isinstance(block, GeneratedManualInsertionBlock):
+        return TranslatedBlock(
+            block_id=block_id,
+            original_page_number=original_page_number,
+            order=block.order,
+            type=block.type,
+            source_text=None,
+            translated_text=None,
+            segment_handling=SegmentHandling.MANUAL_INSERTION,
+            manual_insertion_reason=block.manual_insertion_reason,
+            continuation=block.continuation,
+            classification_review_required=block.classification_review_required,
+        )
+    if isinstance(block, GeneratedFootnoteBlock):
+        return TranslatedBlock(
+            block_id=block_id,
+            original_page_number=original_page_number,
+            order=block.order,
+            type=block.type,
+            source_text=block.source_text,
+            translated_text=block.translated_text,
+            segment_handling=SegmentHandling.TRANSLATE,
+            footnote_marker=block.footnote_marker,
+            continuation=block.continuation,
+            uncertainties=block.uncertainties,
+            classification_review_required=block.classification_review_required,
+        )
+    return TranslatedBlock(
+        block_id=block_id,
+        original_page_number=original_page_number,
+        order=block.order,
+        type=block.type,
+        source_text=block.source_text,
+        translated_text=block.translated_text,
+        heading_level=block.heading_level,
+        uncertainties=block.uncertainties,
+        segment_handling=SegmentHandling.TRANSLATE,
+        classification_review_required=block.classification_review_required,
+    )
+
+
+def _pending_table_blocks(translation: PageTranslation) -> list[TranslatedBlock]:
+    return [
+        block
+        for block in translation.blocks
+        if block.type is BlockType.TABLE
+        and block.segment_handling is SegmentHandling.MANUAL_INSERTION
+        and not block.legacy_manual_table
+    ]
+
+
+def _validate_completed_table_checkpoint(
+    *,
+    translation: PageTranslation,
+    page: PreparedPage,
+    markdown: str,
+    settings: TranslationSettings,
+    descriptor: ProviderDescriptor,
+    previous_pages: list[PageTranslation],
+) -> None:
+    metadata = translation.table_reconstruction
+    if metadata is None:
+        return
+    first_pass = _restore_first_pass_table_tags(translation)
+    table_blocks = _pending_table_blocks(first_pass)
+    table_prompt = build_table_prompt(
+        page_translation=first_pass,
+        markdown=markdown,
+        settings=settings,
+        previous_pages=previous_pages,
+    )
+    expected_fingerprint = table_input_fingerprint(
+        page=page,
+        settings=settings,
+        provider=descriptor,
+        prompt=table_prompt,
+        first_pass_fingerprint=translation.input_fingerprint,
+        table_blocks=table_blocks,
+    )
+    if metadata.input_fingerprint != expected_fingerprint:
+        raise StaleCheckpointError(
+            f"Page {page.original_page_number} has a table checkpoint from different "
+            "inputs, context, targets, config, prompt, provider, or model; rerun with --force"
+        )
+
+
+def _restore_first_pass_table_tags(translation: PageTranslation) -> PageTranslation:
+    blocks: list[TranslatedBlock] = []
+    for block in translation.blocks:
+        if block.segment_handling is not SegmentHandling.TABLE_RECONSTRUCTION:
+            blocks.append(block)
+            continue
+        blocks.append(
+            TranslatedBlock.model_validate(
+                {
+                    **block.model_dump(mode="python"),
+                    "translated_text": None,
+                    "uncertainties": [],
+                    "segment_handling": SegmentHandling.MANUAL_INSERTION,
+                }
+            )
+        )
+    return PageTranslation.model_validate(
+        {
+            **translation.model_dump(mode="python"),
+            "blocks": blocks,
+            "table_reconstruction": None,
+        }
+    )
+
+
+def _refresh_page_evidence(
+    checkpoint: PageTranslation,
+    page: PreparedPage,
+    markdown: str,
+) -> PageTranslation:
+    return PageTranslation.model_validate(
+        {
+            **checkpoint.model_dump(mode="python"),
+            "pdf_page_label": page.pdf_page_label,
+            "extraction_status": page.extraction_status,
+            "extracted_character_count": page.extracted_character_count,
+            "extraction_warnings": page.extraction_warnings,
+            "source_markdown": markdown,
+            "source_markdown_artifact": page.markdown,
+            "source_image": page.image,
+        }
+    )
+
+
+def _apply_table_reconstruction(
+    translation: PageTranslation,
+    generated_tables: list[GeneratedTableMarkdown],
+    *,
+    table_fingerprint: str,
+    descriptor: ProviderDescriptor,
+    response_id: str | None,
+    input_tokens: int | None,
+    output_tokens: int | None,
+) -> PageTranslation:
+    table_blocks = _pending_table_blocks(translation)
+    expected_orders = [block.order for block in table_blocks]
+    returned_orders = [table.order for table in generated_tables]
+    if returned_orders != expected_orders:
+        raise ValueError(
+            "Table reconstruction must return exactly the requested block orders; "
+            f"expected {expected_orders}, received {returned_orders}"
+        )
+    generated_by_order = {table.order: table for table in generated_tables}
+    reconstructed_blocks: list[TranslatedBlock] = []
+    reconstructed_ids: list[str] = []
+    for block in translation.blocks:
+        generated = generated_by_order.get(block.order)
+        if generated is None:
+            reconstructed_blocks.append(block)
+            continue
+        reconstructed_ids.append(block.block_id)
+        reconstructed_blocks.append(
+            TranslatedBlock.model_validate(
+                {
+                    **block.model_dump(mode="python"),
+                    "source_text": None,
+                    "translated_text": generated.translated_markdown,
+                    "uncertainties": generated.uncertainties,
+                    "segment_handling": SegmentHandling.TABLE_RECONSTRUCTION,
+                }
+            )
+        )
+    metadata = TableReconstructionMetadata(
+        input_fingerprint=table_fingerprint,
+        block_ids=reconstructed_ids,
+        provider=ProviderMetadata(
+            provider=descriptor.provider,
+            model=descriptor.model,
+            prompt_version=TABLE_PROMPT_VERSION,
+            configuration=dict(descriptor.configuration),
+            semantic_configuration=dict(descriptor.semantic_configuration),
+            response_id=response_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        ),
+    )
+    return PageTranslation.model_validate(
+        {
+            **translation.model_dump(mode="python"),
+            "blocks": reconstructed_blocks,
+            "table_reconstruction": metadata,
+        }
+    )
 
 
 def _job_id(source_pdf: Path, source_hash: str) -> str:

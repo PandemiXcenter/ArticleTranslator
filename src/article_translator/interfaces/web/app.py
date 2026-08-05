@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from fastapi import Cookie, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import SecretStr, ValidationError
 from starlette.middleware.base import RequestResponseEndpoint
 
@@ -45,6 +45,7 @@ from article_translator.interfaces.web.schemas import (
     BlockRevisionRequest,
     GlossaryEntry,
     JobTranslationSettings,
+    ReviewPositionRequest,
     UncertaintyReplacementRequest,
 )
 
@@ -144,9 +145,12 @@ def create_app(
                 "max_glossary_entries": config.web.max_glossary_entries,
                 "max_term_characters": config.web.max_term_characters,
                 "status_poll_interval_ms": config.web.status_poll_interval_ms,
-                "review_context_pages": config.web.review_context_pages,
             },
         }
+
+    @app.get("/api/jobs")
+    def list_review_jobs() -> dict[str, object]:
+        return {"jobs": [asdict(snapshot) for snapshot in manager.list_reviews()]}
 
     @app.post("/api/jobs", status_code=202)
     async def create_job(
@@ -204,8 +208,48 @@ def create_app(
 
     @app.get("/api/jobs/{job_id}/review")
     def review_document(job_id: str) -> dict[str, object]:
-        _, _, _, review = _review_context(manager, job_id)
-        return _review_payload(review)
+        document, translation_run_id, service, review = _review_context(manager, job_id)
+        position = service.get_review_position(document, translation_run_id)
+        payload = _review_payload(review)
+        payload["continue_page"] = (
+            position.original_page_number
+            if position is not None
+            else _default_continue_page(review)
+        )
+        return payload
+
+    @app.get("/api/jobs/{job_id}/pages/{page_number}/image")
+    def review_page_image(job_id: str, page_number: int) -> FileResponse:
+        repository, document, _ = _document_context(manager, job_id)
+        if page_number < 1 or page_number > document.page_count:
+            raise HTTPException(status_code=404, detail="Physical page was not found")
+        page = document.pages[page_number - 1]
+        if page.original_page_number != page_number:
+            raise ArtifactError("Canonical document pages are not in physical order")
+        if page.source_image.media_type != "image/png":
+            raise ArtifactError("Review page image has an unsupported media type")
+        return FileResponse(repository.resolve(page.source_image), media_type="image/png")
+
+    @app.put("/api/jobs/{job_id}/review-position")
+    def save_review_position(
+        job_id: str,
+        command: ReviewPositionRequest,
+        at_csrf: Annotated[str | None, Cookie()] = None,
+        x_csrf_token: Annotated[str | None, Header()] = None,
+    ) -> dict[str, object]:
+        _require_csrf(at_csrf, x_csrf_token)
+        repository, document, translation_run_id = _document_context(manager, job_id)
+        service = EditorialService(repository)
+        position = service.save_review_position(
+            document,
+            translation_run_id,
+            command.original_page_number,
+        )
+        return {
+            "translation_run_id": position.translation_run_id,
+            "original_page_number": position.original_page_number,
+            "updated_at": position.updated_at,
+        }
 
     @app.post("/api/jobs/{job_id}/revisions")
     def revise_block(
@@ -469,15 +513,23 @@ def _review_context(
     manager: WebJobManager,
     job_id: str,
 ) -> tuple[DocumentTranslation, str, EditorialService, ReviewDocument]:
+    repository, document, translation_run_id = _document_context(manager, job_id)
+    service = EditorialService(repository)
+    review = service.review_document(document, translation_run_id)
+    return document, translation_run_id, service, review
+
+
+def _document_context(
+    manager: WebJobManager,
+    job_id: str,
+) -> tuple[FilesystemArtifactRepository, DocumentTranslation, str]:
     try:
         job_dir, translation_run_id = manager.ready_context(job_id)
     except WebJobNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     repository = FilesystemArtifactRepository(job_dir)
     document = repository.read_document(translation_run_id)
-    service = EditorialService(repository)
-    review = service.review_document(document, translation_run_id)
-    return document, translation_run_id, service, review
+    return repository, document, translation_run_id
 
 
 def _review_payload(review: ReviewDocument) -> dict[str, object]:
@@ -497,9 +549,20 @@ def _review_payload(review: ReviewDocument) -> dict[str, object]:
                         "original_page_number": block.original_page_number,
                         "order": block.order,
                         "type": block.type.value,
+                        "segment_handling": block.segment_handling.value,
                         "source_text": block.source_text,
                         "machine_text": block.machine_translated_text,
                         "effective_text": block.effective_translated_text,
+                        "manual_insertion_reason": (
+                            block.manual_insertion_reason.value
+                            if block.manual_insertion_reason is not None
+                            else None
+                        ),
+                        "footnote_marker": block.footnote_marker,
+                        "continuation": (
+                            block.continuation.value if block.continuation is not None else None
+                        ),
+                        "classification_review_required": (block.classification_review_required),
                         "base_revision": block.latest_revision_number,
                         "review_status": block.review_status.value,
                         "uncertainties": [
@@ -519,6 +582,13 @@ def _review_payload(review: ReviewDocument) -> dict[str, object]:
             for page in review.pages
         ],
     }
+
+
+def _default_continue_page(review: ReviewDocument) -> int:
+    for page in review.pages:
+        if any(block.review_status.value != "accepted" for block in page.blocks):
+            return page.original_page_number
+    return review.pages[-1].original_page_number
 
 
 def _range_uncertainty_payload(

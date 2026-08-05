@@ -36,6 +36,8 @@ custom_instructions = ""
 preserve_names = true
 preserve_citations = true
 mark_uncertain_terms = true
+# Include this many finalized prior page translations as read-only continuity context.
+previous_page_context_count = 2
 
 # Add source-term = "preferred target rendering" pairs here.
 [translation.glossary]
@@ -56,5 +58,3 @@ max_pdf_pages = 500
 max_glossary_entries = 500
 max_term_characters = 500
 status_poll_interval_ms = 1000
-# Render the active review page plus this many physical pages on either side.
-review_context_pages = 2

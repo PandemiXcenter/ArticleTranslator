@@ -54,9 +54,7 @@
         role="tab"
         aria-selected="false"
         aria-controls="review-panel"
-        aria-disabled="true"
         tabindex="-1"
-        disabled
         data-tab="review"
       >Review</button>
     </nav>
@@ -135,8 +133,10 @@
 
             <div class="form-footer">
               <p class="privacy-note" id="privacy-note">
-                The configured provider receives one page image and its extracted
-                text per request. Files and review data are stored locally.
+                The configured provider receives the current page image and extracted
+                text. Table-bearing pages send that page again for reconstruction;
+                finalized prior-page translations may be included for continuity.
+                Files and review data are stored locally.
               </p>
               <div class="submit-actions">
                 <p id="form-error" class="field-error submit-error" hidden></p>
@@ -306,61 +306,96 @@
         data-testid="review-view"
         hidden
       >
-        <header class="review-toolbar">
-          <div>
-            <h1 id="review-heading">Review</h1>
-            <p class="review-document" id="review-document"></p>
-          </div>
-          <div class="review-actions">
-            <span id="review-progress" class="review-progress"></span>
+        <div id="review-library" class="review-library">
+          <header class="panel-header">
+            <div>
+              <h1>Translations</h1>
+              <p>Open a completed translation to continue reviewing it.</p>
+            </div>
             <button
-              id="new-translation"
+              id="refresh-translations"
               class="secondary-button compact-control"
               type="button"
-            >New translation</button>
-            <a id="export-link" class="secondary-button compact-control" href="#" download>
-              Export Markdown
-            </a>
-          </div>
-        </header>
-
-        <div class="review-key" aria-label="Review legend">
-          <span><i class="legend-source" aria-hidden="true"></i> Original</span>
-          <span><i class="legend-uncertain" aria-hidden="true">?</i> Needs attention</span>
-          <span id="active-page-label">Physical page 1</span>
+            >Refresh</button>
+          </header>
+          <div id="review-list" class="review-list" role="list"></div>
+          <p id="review-list-empty" class="empty-message">
+            No completed translations were found.
+          </p>
         </div>
 
-        <div class="review-grid">
-          <section class="review-pane source-pane" aria-labelledby="source-heading">
-            <header class="pane-heading">
-              <h2 id="source-heading">Original text</h2>
-              <span>Follows translation</span>
-            </header>
-            <div
-              id="source-scroll"
-              class="document-scroll source-scroll"
-              aria-label="Original text, synchronized with the translation"
-              aria-readonly="true"
-            >
-              <div id="source-content" class="document-content"></div>
+        <div id="review-editor" class="review-editor" hidden>
+          <header class="review-toolbar">
+            <div>
+              <h1 id="review-heading">Review</h1>
+              <p class="review-document" id="review-document"></p>
             </div>
-          </section>
+            <div class="review-actions">
+              <span id="review-progress" class="review-progress"></span>
+              <button
+                id="back-to-translations"
+                class="secondary-button compact-control"
+                type="button"
+              >All translations</button>
+              <button
+                id="new-translation"
+                class="secondary-button compact-control"
+                type="button"
+              >New translation</button>
+              <a id="export-link" class="secondary-button compact-control" href="#" download>
+                Export Markdown
+              </a>
+            </div>
+          </header>
 
-          <section class="review-pane translation-pane" aria-labelledby="translation-heading">
-            <header class="pane-heading">
-              <h2 id="translation-heading">Translated text</h2>
-              <span>Scroll and edit here</span>
-            </header>
-            <div
-              id="translation-scroll"
-              class="document-scroll translation-scroll"
-              data-testid="translation-scroll"
-              tabindex="0"
-              aria-label="Editable translated text"
-            >
-              <div id="translation-content" class="document-content"></div>
-            </div>
-          </section>
+          <div class="review-key" aria-label="Review legend">
+            <span><i class="legend-source" aria-hidden="true"></i> Page image</span>
+            <span><i class="legend-edited" aria-hidden="true"></i> Manual edit</span>
+            <span><i class="legend-uncertain" aria-hidden="true">?</i> Needs attention</span>
+            <span id="active-page-label">Physical page 1</span>
+          </div>
+
+          <div class="review-grid">
+            <section class="review-pane source-pane" aria-labelledby="source-heading">
+              <header class="pane-heading">
+                <h2 id="source-heading">Original page</h2>
+                <a id="full-size-page-link" href="#" target="_blank" rel="noopener">
+                  Open full size
+                </a>
+              </header>
+              <div
+                id="source-scroll"
+                class="document-scroll source-scroll"
+                aria-label="Original page image, synchronized with the translation"
+                aria-readonly="true"
+              >
+                <div id="source-content" class="document-content source-image-content">
+                  <p id="source-page-label" class="page-label">Physical page 1</p>
+                  <img
+                    id="source-page-image"
+                    class="source-page-image"
+                    alt="Original physical page 1"
+                  >
+                </div>
+              </div>
+            </section>
+
+            <section class="review-pane translation-pane" aria-labelledby="translation-heading">
+              <header class="pane-heading">
+                <h2 id="translation-heading">Translated text</h2>
+                <span>Scroll and edit here</span>
+              </header>
+              <div
+                id="translation-scroll"
+                class="document-scroll translation-scroll"
+                data-testid="translation-scroll"
+                tabindex="0"
+                aria-label="Editable translated text"
+              >
+                <div id="translation-content" class="document-content"></div>
+              </div>
+            </section>
+          </div>
         </div>
       </section>
     </main>

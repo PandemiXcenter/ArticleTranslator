@@ -74,7 +74,6 @@ class WebConfig(ConfigModel):
     max_glossary_entries: int = Field(ge=0, le=10_000)
     max_term_characters: int = Field(ge=1, le=4_000)
     status_poll_interval_ms: int = Field(ge=250, le=30_000)
-    review_context_pages: int = Field(ge=1, le=10)
 
 
 class ConfiguredTranslationSettings(TranslationSettings):
@@ -88,6 +87,7 @@ class ConfiguredTranslationSettings(TranslationSettings):
     preserve_names: bool
     preserve_citations: bool
     mark_uncertain_terms: bool
+    previous_page_context_count: int = Field(ge=0, le=10)
 
 
 class ConfiguredMarkdownExportSettings(MarkdownExportSettings):

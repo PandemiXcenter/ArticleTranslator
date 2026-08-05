@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -16,10 +17,13 @@ from article_translator.domain.enums import (
     BlockType,
     ExtractionStatus,
     JobStatus,
+    ManualInsertionReason,
+    SegmentContinuation,
+    SegmentHandling,
     TranslationStyle,
 )
 
-SCHEMA_VERSION: Literal["2.0"] = "2.0"
+SCHEMA_VERSION: Literal["4.0"] = "4.0"
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 TranslationRunId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
@@ -76,6 +80,7 @@ class TranslationSettings(ContractModel):
     preserve_names: bool = True
     preserve_citations: bool = True
     mark_uncertain_terms: bool = True
+    previous_page_context_count: int = Field(default=0, ge=0, le=10)
 
     @field_validator("custom_instructions")
     @classmethod
@@ -116,22 +121,84 @@ class UncertainTerm(ContractModel):
     alternatives: list[str] = Field(default_factory=list)
 
 
-class GeneratedBlock(ContractModel):
-    """The intentionally small schema owned by the language model."""
+OrdinaryBlockType: TypeAlias = Literal[  # noqa: UP040
+    BlockType.TITLE,
+    BlockType.SUBTITLE,
+    BlockType.BYLINE,
+    BlockType.HEADING,
+    BlockType.BODY,
+    BlockType.LIST_ITEM,
+    BlockType.QUOTE,
+    BlockType.CAPTION,
+    BlockType.PAGE_NUMBER,
+    BlockType.HEADER,
+    BlockType.FOOTER,
+    BlockType.EQUATION,
+    BlockType.OTHER,
+]
+
+
+class GeneratedTextBlock(ContractModel):
+    """Ordinary provider text that is transcribed and translated."""
 
     order: int = Field(ge=1)
-    type: BlockType
+    type: OrdinaryBlockType
     source_text: NonEmptyText
     translated_text: NonEmptyText
     heading_level: int | None = Field(default=None, ge=1, le=6)
     uncertainties: list[UncertainTerm] = Field(default_factory=list)
+    classification_review_required: bool = False
+
+
+class GeneratedFootnoteBlock(ContractModel):
+    """A functional footnote, regardless of its size or position on the page."""
+
+    order: int = Field(ge=1)
+    type: Literal[BlockType.FOOTNOTE]
+    source_text: NonEmptyText
+    translated_text: NonEmptyText
+    footnote_marker: str | None
+    continuation: SegmentContinuation
+    uncertainties: list[UncertainTerm] = Field(default_factory=list)
+    classification_review_required: bool = False
+
+    @field_validator("footnote_marker")
+    @classmethod
+    def normalize_footnote_marker(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
+class GeneratedManualInsertionBlock(ContractModel):
+    """A text-free first-pass table tag or figure requiring manual insertion."""
+
+    order: int = Field(ge=1)
+    type: Literal[BlockType.TABLE, BlockType.FIGURE]
+    manual_insertion_reason: ManualInsertionReason
+    continuation: SegmentContinuation
+    classification_review_required: bool = False
+
+    @model_validator(mode="after")
+    def reason_must_match_block_type(self) -> Self:
+        _validate_manual_reason(self.type, self.manual_insertion_reason)
+        return self
+
+
+# Preserve the existing ordinary-block constructor while the page payload uses
+# distinct provider variants for footnotes and manual regions.
+GeneratedBlock = GeneratedTextBlock
+GeneratedBlockVariant: TypeAlias = (  # noqa: UP040
+    GeneratedTextBlock | GeneratedFootnoteBlock | GeneratedManualInsertionBlock
+)
 
 
 class GeneratedPagePayload(ContractModel):
     """Provider output before trusted provenance is attached."""
 
     detected_printed_page_label: str | None = None
-    blocks: list[GeneratedBlock] = Field(default_factory=list)
+    blocks: list[GeneratedBlockVariant] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def block_order_must_be_unique_and_contiguous(self) -> Self:
@@ -140,6 +207,61 @@ class GeneratedPagePayload(ContractModel):
         if orders != expected:
             raise ValueError(f"block order must be contiguous and ordered; expected {expected}")
         return self
+
+
+class GeneratedTableMarkdown(ContractModel):
+    """One table reconstructed in target-language GitHub-flavored Markdown."""
+
+    order: int = Field(ge=1)
+    translated_markdown: NonEmptyText
+    uncertainties: list[UncertainTerm] = Field(default_factory=list)
+
+    @field_validator("translated_markdown")
+    @classmethod
+    def markdown_must_be_an_unfenced_gfm_table(cls, value: str) -> str:
+        if "```" in value:
+            raise ValueError("table Markdown must not use a code fence")
+        lines = [line.strip() for line in value.splitlines() if line.strip()]
+        if len(lines) < 3:
+            raise ValueError("table Markdown must contain a header, delimiter, and data row")
+        rows = [_split_gfm_row(line) for line in lines]
+        if any(row is None for row in rows):
+            raise ValueError("every table Markdown line must be a pipe-delimited row")
+        parsed_rows = [row for row in rows if row is not None]
+        column_count = len(parsed_rows[0])
+        if column_count < 1 or any(len(row) != column_count for row in parsed_rows[1:]):
+            raise ValueError("table Markdown rows must have matching column counts")
+        if not _is_gfm_delimiter_row(parsed_rows[1]):
+            raise ValueError("table Markdown must contain a GitHub-flavored table delimiter row")
+        return value
+
+
+class GeneratedTablePayload(ContractModel):
+    """Atomic reconstruction output for every table tagged in one page pass."""
+
+    tables: list[GeneratedTableMarkdown] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def table_orders_must_be_unique_and_ascending(self) -> Self:
+        orders = [table.order for table in self.tables]
+        if orders != sorted(set(orders)):
+            raise ValueError("table orders must be unique and ascending")
+        return self
+
+
+def _split_gfm_row(line: str) -> list[str] | None:
+    stripped = line.strip()
+    if "|" not in stripped:
+        return None
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|") and not stripped.endswith(r"\|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in re.split(r"(?<!\\)\|", stripped)]
+
+
+def _is_gfm_delimiter_row(cells: list[str]) -> bool:
+    return all(re.fullmatch(r":?-{3,}:?", cell) is not None for cell in cells)
 
 
 class ProviderMetadata(ContractModel):
@@ -153,6 +275,22 @@ class ProviderMetadata(ContractModel):
     output_tokens: int | None = Field(default=None, ge=0)
 
 
+class TableReconstructionMetadata(ContractModel):
+    """Bounded provenance for the optional second provider pass on one page."""
+
+    input_fingerprint: Sha256
+    block_ids: list[NonEmptyText] = Field(min_length=1)
+    provider: ProviderMetadata
+    reconstructed_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("block_ids")
+    @classmethod
+    def block_ids_must_be_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("table reconstruction block IDs must be unique")
+        return value
+
+
 class TranslatedBlock(ContractModel):
     """Validated model output enriched with pipeline-owned identity."""
 
@@ -160,16 +298,105 @@ class TranslatedBlock(ContractModel):
     original_page_number: int = Field(ge=1)
     order: int = Field(ge=1)
     type: BlockType
-    source_text: NonEmptyText
-    translated_text: NonEmptyText
+    source_text: NonEmptyText | None
+    translated_text: NonEmptyText | None
     heading_level: int | None = Field(default=None, ge=1, le=6)
     uncertainties: list[UncertainTerm] = Field(default_factory=list)
+    segment_handling: SegmentHandling = SegmentHandling.TRANSLATE
+    manual_insertion_reason: ManualInsertionReason | None = None
+    footnote_marker: str | None = None
+    continuation: SegmentContinuation | None = None
+    classification_review_required: bool = False
+    legacy_translated_table: bool = False
+    legacy_manual_table: bool = False
+
+    @field_validator("footnote_marker")
+    @classmethod
+    def normalize_footnote_marker(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @model_validator(mode="after")
+    def segment_contract_must_be_consistent(self) -> Self:
+        _validate_segment_contract(self)
+        return self
+
+
+def _validate_segment_contract(block: TranslatedBlock) -> None:
+    if block.segment_handling is SegmentHandling.MANUAL_INSERTION:
+        if block.legacy_translated_table:
+            raise ValueError("manual insertion blocks cannot be legacy translated tables")
+        if block.legacy_manual_table and block.type is not BlockType.TABLE:
+            raise ValueError("legacy manual-table compatibility applies only to table blocks")
+        if block.type not in {BlockType.TABLE, BlockType.FIGURE}:
+            raise ValueError("manual insertion is valid only for table and figure blocks")
+        if block.manual_insertion_reason is None:
+            raise ValueError("manual insertion blocks must state a reason")
+        _validate_manual_reason(block.type, block.manual_insertion_reason)
+        if block.source_text is not None or block.translated_text is not None:
+            raise ValueError("manual insertion blocks must not contain source or translated text")
+        if block.heading_level is not None:
+            raise ValueError("manual insertion blocks cannot have a heading level")
+        if block.uncertainties:
+            raise ValueError("manual insertion blocks cannot contain text uncertainties")
+        if block.footnote_marker is not None:
+            raise ValueError("manual insertion blocks cannot contain a footnote marker")
+        if block.continuation is None:
+            raise ValueError("manual insertion blocks must state their continuation relationship")
+        return
+
+    if block.segment_handling is SegmentHandling.TABLE_RECONSTRUCTION:
+        if block.type is not BlockType.TABLE:
+            raise ValueError("table reconstruction handling is valid only for table blocks")
+        if block.source_text is not None or block.translated_text is None:
+            raise ValueError("reconstructed tables must contain only translated Markdown")
+        if block.manual_insertion_reason not in {
+            ManualInsertionReason.TABLE,
+            ManualInsertionReason.TABLE_LIKE,
+        }:
+            raise ValueError("reconstructed tables must retain their table-region reason")
+        if block.continuation is None:
+            raise ValueError("reconstructed tables must retain continuation metadata")
+        if block.heading_level is not None or block.footnote_marker is not None:
+            raise ValueError("reconstructed tables cannot contain heading or footnote metadata")
+        if block.legacy_translated_table or block.legacy_manual_table:
+            raise ValueError("reconstructed tables cannot use legacy compatibility markers")
+        return
+
+    if block.manual_insertion_reason is not None:
+        raise ValueError("translated blocks cannot state a manual insertion reason")
+    if block.source_text is None or block.translated_text is None:
+        raise ValueError("translated blocks must contain source and translated text")
+    if block.type is BlockType.FIGURE:
+        raise ValueError("figure blocks must use manual insertion handling")
+    if block.type is BlockType.TABLE and not block.legacy_translated_table:
+        raise ValueError("new table blocks must use table reconstruction handling")
+    if block.type is not BlockType.TABLE and block.legacy_translated_table:
+        raise ValueError("legacy translated table compatibility applies only to table blocks")
+    if block.legacy_manual_table:
+        raise ValueError("translated blocks cannot be legacy manual tables")
+    if block.type is not BlockType.FOOTNOTE and (
+        block.footnote_marker is not None or block.continuation is not None
+    ):
+        raise ValueError("footnote metadata is valid only for footnote blocks")
+
+
+def _validate_manual_reason(
+    block_type: BlockType,
+    reason: ManualInsertionReason,
+) -> None:
+    if block_type is BlockType.FIGURE and reason is not ManualInsertionReason.FIGURE:
+        raise ValueError("figure blocks must use the figure manual insertion reason")
+    if block_type is BlockType.TABLE and reason is ManualInsertionReason.FIGURE:
+        raise ValueError("table blocks must use a table or table-like insertion reason")
 
 
 class PageTranslation(ContractModel):
     """One independently retriable and cacheable page result."""
 
-    schema_version: Literal["2.0"] = SCHEMA_VERSION
+    schema_version: Literal["4.0"] = SCHEMA_VERSION
     translation_run_id: TranslationRunId
     original_page_number: int = Field(ge=1)
     pdf_page_label: str | None = None
@@ -183,6 +410,7 @@ class PageTranslation(ContractModel):
     blocks: list[TranslatedBlock] = Field(default_factory=list)
     input_fingerprint: Sha256
     provider: ProviderMetadata
+    table_reconstruction: TableReconstructionMetadata | None = None
     translated_at: datetime = Field(default_factory=utc_now)
 
     @model_validator(mode="after")
@@ -192,13 +420,25 @@ class PageTranslation(ContractModel):
             raise ValueError("translated blocks must be in contiguous reading order")
         if any(block.original_page_number != self.original_page_number for block in self.blocks):
             raise ValueError("every block must belong to its containing page")
+        reconstructed_ids = [
+            block.block_id
+            for block in self.blocks
+            if block.segment_handling is SegmentHandling.TABLE_RECONSTRUCTION
+        ]
+        if reconstructed_ids:
+            if self.table_reconstruction is None:
+                raise ValueError("reconstructed table blocks require table-pass provenance")
+            if self.table_reconstruction.block_ids != reconstructed_ids:
+                raise ValueError("table-pass provenance must name every reconstructed table block")
+        elif self.table_reconstruction is not None:
+            raise ValueError("table-pass provenance requires reconstructed table blocks")
         return self
 
 
 class JobManifest(ContractModel):
     """Mutable run index; page artifacts remain the recovery source of truth."""
 
-    schema_version: Literal["2.0"] = SCHEMA_VERSION
+    schema_version: Literal["4.0"] = SCHEMA_VERSION
     job_id: NonEmptyText
     preparation_id: NonEmptyText
     document_id: Sha256
@@ -216,6 +456,7 @@ class JobManifest(ContractModel):
     provider_configuration: dict[str, ProviderSetting] | None = None
     provider_semantic_configuration: dict[str, ProviderSetting] | None = None
     prompt_version: str | None = None
+    table_prompt_version: str | None = None
     export_settings: MarkdownExportSettings | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -237,9 +478,10 @@ class JobManifest(ContractModel):
 
 
 class PageFailure(ContractModel):
-    schema_version: Literal["2.0"] = SCHEMA_VERSION
+    schema_version: Literal["4.0"] = SCHEMA_VERSION
     original_page_number: int = Field(ge=1)
     input_fingerprint: Sha256 | None = None
+    stage: Literal["page_translation", "table_reconstruction"] = "page_translation"
     error_type: NonEmptyText
     message: NonEmptyText
     occurred_at: datetime = Field(default_factory=utc_now)
@@ -248,7 +490,7 @@ class PageFailure(ContractModel):
 class DocumentTranslation(ContractModel):
     """Canonical dataset consumed by the future editor and all exporters."""
 
-    schema_version: Literal["2.0"] = SCHEMA_VERSION
+    schema_version: Literal["4.0"] = SCHEMA_VERSION
     translation_run_id: TranslationRunId
     document_id: Sha256
     job_id: NonEmptyText
@@ -267,4 +509,14 @@ class DocumentTranslation(ContractModel):
             raise ValueError(f"document must contain translated physical pages {expected}")
         if any(page.translation_run_id != self.translation_run_id for page in self.pages):
             raise ValueError("every page must belong to the document translation run")
+        unresolved_tables = [
+            block.block_id
+            for page in self.pages
+            for block in page.blocks
+            if block.type is BlockType.TABLE
+            and block.segment_handling is SegmentHandling.MANUAL_INSERTION
+            and not block.legacy_manual_table
+        ]
+        if unresolved_tables:
+            raise ValueError("document contains tables awaiting reconstruction")
         return self

@@ -1,13 +1,20 @@
 from datetime import UTC, datetime
 
 from article_translator.application.compile_markdown import compile_markdown
-from article_translator.domain.enums import BlockType, ExtractionStatus
+from article_translator.domain.enums import (
+    BlockType,
+    ExtractionStatus,
+    ManualInsertionReason,
+    SegmentContinuation,
+    SegmentHandling,
+)
 from article_translator.domain.models import (
     ArtifactRef,
     DocumentTranslation,
     MarkdownExportSettings,
     PageTranslation,
     ProviderMetadata,
+    TableReconstructionMetadata,
     TranslatedBlock,
     TranslationSettings,
 )
@@ -111,3 +118,104 @@ def test_compiler_can_include_configured_marginalia() -> None:
 
     assert result.startswith("Journal header\n\n# A translated title")
     assert result.endswith("\n\n17\n")
+
+
+def test_compiler_marks_unresolved_manual_insertion_and_uses_reviewer_markdown() -> None:
+    manual = TranslatedBlock(
+        block_id="p0001-b0001",
+        original_page_number=1,
+        order=1,
+        type=BlockType.TABLE,
+        segment_handling=SegmentHandling.MANUAL_INSERTION,
+        source_text=None,
+        translated_text=None,
+        manual_insertion_reason=ManualInsertionReason.TABLE_LIKE,
+        continuation=SegmentContinuation.COMPLETE,
+        legacy_manual_table=True,
+    )
+    base = document()
+    page = base.pages[0].model_copy(update={"blocks": [manual]})
+    manual_document = base.model_copy(update={"pages": [page]})
+
+    unresolved = compile_markdown(
+        manual_document,
+        MarkdownExportSettings(include_page_comments=False),
+    )
+    assert unresolved == (
+        "> **Manual insertion required:** Table-like material on original page 1 (`p0001-b0001`).\n"
+    )
+    assert (
+        compile_markdown(
+            manual_document,
+            MarkdownExportSettings(include_page_comments=False),
+            editorial_overrides={
+                manual.block_id: "| Month | Cases |\n| --- | ---: |\n| January | 12 |"
+            },
+        )
+        == "| Month | Cases |\n| --- | ---: |\n| January | 12 |\n"
+    )
+
+
+def test_compiler_emits_machine_reconstructed_table_markdown_exactly() -> None:
+    markdown = "| Date | Deaths |\n| --- | ---: |\n| 3 July | 3 |\n| 4 July | 3 |"
+    reconstructed = TranslatedBlock(
+        block_id="p0001-b0001",
+        original_page_number=1,
+        order=1,
+        type=BlockType.TABLE,
+        segment_handling=SegmentHandling.TABLE_RECONSTRUCTION,
+        source_text=None,
+        translated_text=markdown,
+        manual_insertion_reason=ManualInsertionReason.TABLE_LIKE,
+        continuation=SegmentContinuation.COMPLETE,
+    )
+    base = document()
+    table_provider = ProviderMetadata(
+        provider="fake",
+        model="fake-v1",
+        prompt_version="reconstruct-tables-v1",
+    )
+    page = base.pages[0].model_copy(
+        update={
+            "blocks": [reconstructed],
+            "table_reconstruction": TableReconstructionMetadata(
+                input_fingerprint=HASH,
+                block_ids=[reconstructed.block_id],
+                provider=table_provider,
+                reconstructed_at=FIXED_TIME,
+            ),
+        }
+    )
+    reconstructed_document = base.model_copy(update={"pages": [page]})
+
+    assert (
+        compile_markdown(
+            reconstructed_document,
+            MarkdownExportSettings(include_page_comments=False),
+        )
+        == f"{markdown}\n"
+    )
+
+
+def test_compiler_labels_footnote_marker_and_continuation() -> None:
+    footnote = TranslatedBlock(
+        block_id="p0001-b0001",
+        original_page_number=1,
+        order=1,
+        type=BlockType.FOOTNOTE,
+        source_text="Fortsat note.",
+        translated_text="Continued note.",
+        footnote_marker="12",
+        continuation=SegmentContinuation.FROM_PREVIOUS_AND_TO_NEXT_PAGE,
+    )
+    base = document()
+    page = base.pages[0].model_copy(update={"blocks": [footnote]})
+    footnote_document = base.model_copy(update={"pages": [page]})
+
+    assert (
+        compile_markdown(
+            footnote_document,
+            MarkdownExportSettings(include_page_comments=False),
+        )
+        == "> **Footnote 12 (continued across pages):** Continued note.\n"
+    )

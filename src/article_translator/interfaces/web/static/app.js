@@ -8,12 +8,12 @@ const state = {
   pollFailures: 0,
   blockIndex: new Map(),
   uncertaintyIndex: new Map(),
-  sourceElements: new Map(),
   reviewPages: [],
   reviewDrafts: new Map(),
-  reviewWindowCenter: null,
-  reviewWindowShiftFrame: null,
-  renderedPageNumbers: [],
+  sourcePageNumber: null,
+  allowPositionPersistence: false,
+  lastPersistedPage: null,
+  positionQueue: Promise.resolve(),
   activeUncertaintyId: null,
   scrollFrame: null,
   sessionApiKey: "",
@@ -26,6 +26,12 @@ const tabPanels = [...document.querySelectorAll("[role='tabpanel']")];
 const translatePanel = document.querySelector("#translate-panel");
 const reviewPanel = document.querySelector("#review-panel");
 const reviewTab = document.querySelector("#review-tab");
+const reviewLibrary = document.querySelector("#review-library");
+const reviewEditor = document.querySelector("#review-editor");
+const reviewList = document.querySelector("#review-list");
+const reviewListEmpty = document.querySelector("#review-list-empty");
+const refreshTranslationsButton = document.querySelector("#refresh-translations");
+const backToTranslationsButton = document.querySelector("#back-to-translations");
 const translationSetup = document.querySelector("#translation-setup");
 const jobProgress = document.querySelector("#job-progress");
 const form = document.querySelector("#translation-form");
@@ -58,6 +64,9 @@ const sourceScroll = document.querySelector("#source-scroll");
 const translationScroll = document.querySelector("#translation-scroll");
 const sourceContent = document.querySelector("#source-content");
 const translationContent = document.querySelector("#translation-content");
+const sourcePageLabel = document.querySelector("#source-page-label");
+const sourcePageImage = document.querySelector("#source-page-image");
+const fullSizePageLink = document.querySelector("#full-size-page-link");
 const uncertaintyDialog = document.querySelector("#uncertainty-dialog");
 const uncertaintyForm = document.querySelector("#uncertainty-form");
 const closeUncertaintyButton = document.querySelector("#close-uncertainty");
@@ -479,9 +488,18 @@ function populateConfig(config) {
     Boolean(config.api_key_configured),
     Boolean(config.api_key_saved_on_computer),
   );
+  const contextCount = Math.max(
+    0,
+    Number(translation.previous_page_context_count) || 0,
+  );
+  const continuityNotice = contextCount
+    ? ` Finalized text from up to ${contextCount} previous pages is included for continuity.`
+    : " Prior-page continuity context is disabled.";
   document.querySelector("#privacy-note").textContent =
-    `${humanize(provider.name || "The configured provider")} receives one page image ` +
-    "and its extracted text per request. Files and review data are stored locally.";
+    `${humanize(provider.name || "The configured provider")} receives the current page image ` +
+    "and extracted text. Table-bearing pages send that page again for table reconstruction." +
+    continuityNotice +
+    " Files and review data are stored locally.";
 
   const glossary = translation.glossary || {};
   for (const [source, target] of Object.entries(glossary)) {
@@ -752,8 +770,6 @@ async function startTranslation(event) {
       total_pages: job.total_pages || 0,
     };
     state.review = null;
-    reviewTab.disabled = true;
-    reviewTab.setAttribute("aria-disabled", "true");
     window.history.replaceState({}, "", `/?job=${encodeURIComponent(state.jobId)}`);
     translationSetup.hidden = true;
     jobProgress.hidden = false;
@@ -1033,16 +1049,50 @@ function handleReviewPaste(event) {
   editor.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-function makeSourceBlock(block, page) {
-  const article = createElement("article", "source-block");
-  article.dataset.blockId = asText(block.block_id);
-  article.dataset.pageNumber = asText(page.original_page_number);
-  const meta = createElement("div", "block-meta");
-  meta.append(createElement("span", "", humanize(block.type || "text")));
-  const text = createElement("p", "", asText(block.source_text));
-  article.append(meta, text);
-  state.sourceElements.set(asText(block.block_id), article);
-  return article;
+function pageImageUrl(pageNumber) {
+  return `/api/jobs/${encodeURIComponent(state.jobId)}/pages/${encodeURIComponent(
+    pageNumber,
+  )}/image`;
+}
+
+function showSourcePage(page) {
+  const pageNumber = Number(page?.original_page_number) || 1;
+  if (state.sourcePageNumber === pageNumber && sourcePageImage.getAttribute("src")) {
+    return;
+  }
+  state.sourcePageNumber = pageNumber;
+  const details = pageDescription(page || {});
+  sourcePageLabel.replaceChildren(
+    document.createTextNode(`Physical page ${pageNumber}`),
+  );
+  if (details) {
+    sourcePageLabel.append(createElement("span", "", details));
+  }
+  const url = pageImageUrl(pageNumber);
+  sourcePageImage.alt = `Original physical page ${pageNumber}`;
+  sourcePageImage.src = url;
+  fullSizePageLink.href = url;
+}
+
+function provenanceLabel(block) {
+  const revision = Math.max(0, Number(block.base_revision) || 0);
+  const reconstructedTable = block.segment_handling === "table_reconstruction";
+  if (block.segment_handling === "manual_insertion" && revision === 0) {
+    return "Manual insertion required";
+  }
+  if (reconstructedTable && revision === 0) {
+    return "Machine-reconstructed table";
+  }
+  if (revision === 0) {
+    return "Machine translation";
+  }
+  const changed = asText(block.effective_text) !== asText(block.machine_text);
+  if (reconstructedTable) {
+    return changed
+      ? `Machine-reconstructed table · manually edited · revision ${revision}`
+      : `Machine-reconstructed table · reviewed unchanged · revision ${revision}`;
+  }
+  return changed ? `Manually edited · revision ${revision}` : `Reviewed unchanged · revision ${revision}`;
 }
 
 function updateBlockStatus(blockElement, block) {
@@ -1060,9 +1110,23 @@ function makeTranslationBlock(block, page, draftText) {
   article.dataset.blockId = asText(block.block_id);
   article.dataset.pageNumber = asText(page.original_page_number);
   article.dataset.baseRevision = asText(block.base_revision, "0");
+  const manualInsertion = block.segment_handling === "manual_insertion";
+  article.classList.toggle("manual-insertion-block", manualInsertion);
 
   const meta = createElement("div", "block-meta");
   meta.append(createElement("span", "", humanize(block.type || "text")));
+  const provenance = createElement(
+    "span",
+    Number(block.base_revision) > 0 ? "provenance edited" : "provenance machine",
+    provenanceLabel(block),
+  );
+  meta.append(provenance);
+  if (block.continuation) {
+    meta.append(createElement("span", "continuation", humanize(block.continuation)));
+  }
+  if (block.classification_review_required === true) {
+    meta.append(createElement("span", "classification-warning", "Check classification"));
+  }
   const status = createElement(
     "span",
     `status ${reviewStatusClass(asText(block.review_status))}`.trim(),
@@ -1078,10 +1142,20 @@ function makeTranslationBlock(block, page, draftText) {
   editor.setAttribute("aria-multiline", "true");
   editor.setAttribute(
     "aria-label",
-    `Translation for physical page ${asText(page.original_page_number)}, ${humanize(
-      block.type || "text",
-    )}`,
+    manualInsertion
+      ? `Manual insertion for physical page ${asText(page.original_page_number)}, ${humanize(
+          block.type || "material",
+        )}`
+      : `Translation for physical page ${asText(page.original_page_number)}, ${humanize(
+          block.type || "text",
+        )}`,
   );
+  if (manualInsertion) {
+    editor.classList.add("manual-insertion-editor");
+    editor.dataset.placeholder = `Insert the ${humanize(
+      block.manual_insertion_reason || block.type || "material",
+    ).toLocaleLowerCase()} manually from the page image.`;
+  }
   const effectiveText = asText(block.effective_text, asText(block.machine_text));
   const displayedText = draftText === undefined ? effectiveText : draftText;
   const handled = renderHighlightedText(editor, displayedText, block);
@@ -1105,7 +1179,11 @@ function makeTranslationBlock(block, page, draftText) {
   }
 
   const actions = createElement("div", "block-actions");
-  const save = createElement("button", "block-action save-action", "Save");
+  const save = createElement(
+    "button",
+    "block-action save-action",
+    manualInsertion ? "Save insertion" : "Save",
+  );
   save.type = "button";
   save.dataset.testid = "save-block";
   save.dataset.action = "save-block";
@@ -1121,6 +1199,24 @@ function makeTranslationBlock(block, page, draftText) {
   actions.append(save, validate, message);
 
   article.append(meta, editor);
+  if (
+    Number(block.base_revision) > 0 &&
+    asText(block.machine_text) &&
+    asText(block.effective_text) !== asText(block.machine_text)
+  ) {
+    const machineDetails = createElement("details", "machine-text-details");
+    machineDetails.append(
+      createElement(
+        "summary",
+        "",
+        block.segment_handling === "table_reconstruction"
+          ? "Show original machine reconstruction"
+          : "Show original machine translation",
+      ),
+      createElement("p", "", asText(block.machine_text)),
+    );
+    article.append(machineDetails);
+  }
   if (fallbackContainer.childElementCount) {
     article.append(fallbackContainer);
   }
@@ -1179,37 +1275,20 @@ function updateReviewSummary() {
     (count, block) => count + unresolvedUncertainties(block).length,
     0,
   );
+  const classificationChecks = blocks.filter(
+    (block) => block.classification_review_required === true,
+  ).length;
   const validation =
     blocks.length > 0 ? `${accepted} of ${blocks.length} validated` : "No text blocks";
-  reviewProgress.textContent =
+  const uncertaintySummary =
     uncertain > 0
       ? `${validation} · ${uncertain} ${uncertain === 1 ? "uncertainty" : "uncertainties"}`
       : `${validation} · no open uncertainties`;
-}
-
-function reviewContextPages() {
-  const configured = Number(state.config?.limits?.review_context_pages);
-  return Number.isInteger(configured) && configured >= 1 ? configured : 2;
-}
-
-function normalizedWindowCenter(requestedPageNumber) {
-  const requested = Number(requestedPageNumber);
-  const exact = state.reviewPages.find(
-    (page) => Number(page.original_page_number) === requested,
-  );
-  return Number(exact?.original_page_number || state.reviewPages[0]?.original_page_number || 1);
-}
-
-function reviewWindowPages(centerPageNumber) {
-  const center = normalizedWindowCenter(centerPageNumber);
-  const centerIndex = state.reviewPages.findIndex(
-    (page) => Number(page.original_page_number) === center,
-  );
-  const context = reviewContextPages();
-  return state.reviewPages.slice(
-    Math.max(0, centerIndex - context),
-    Math.min(state.reviewPages.length, centerIndex + context + 1),
-  );
+  reviewProgress.textContent = classificationChecks
+    ? `${uncertaintySummary} · ${classificationChecks} classification ${
+        classificationChecks === 1 ? "check" : "checks"
+      }`
+    : uncertaintySummary;
 }
 
 function renderedPageElement(container, pageNumber) {
@@ -1218,44 +1297,27 @@ function renderedPageElement(container, pageNumber) {
   );
 }
 
-function renderReviewWindow(centerPageNumber, options = {}) {
-  if (options.captureDrafts !== false) {
-    captureDrafts();
-  }
+function renderAllReviewPages(options = {}) {
   if (state.scrollFrame !== null) {
     cancelAnimationFrame(state.scrollFrame);
     state.scrollFrame = null;
   }
-  sourceContent.replaceChildren();
   translationContent.replaceChildren();
-  state.sourceElements = new Map();
-  state.reviewWindowCenter = normalizedWindowCenter(centerPageNumber);
-  const pages = reviewWindowPages(state.reviewWindowCenter);
-  state.renderedPageNumbers = pages.map((page) => Number(page.original_page_number));
-  for (const container of [sourceContent, translationContent]) {
-    container.dataset.windowStart = asText(state.renderedPageNumbers[0]);
-    container.dataset.windowEnd = asText(state.renderedPageNumbers.at(-1));
-    container.dataset.renderedPageCount = asText(state.renderedPageNumbers.length);
-  }
+  translationContent.dataset.renderedPageCount = asText(state.reviewPages.length);
 
-  if (!pages.length) {
-    sourceContent.append(createElement("p", "lede", "No source pages were returned."));
+  if (!state.reviewPages.length) {
     translationContent.append(
       createElement("p", "lede", "No translated pages were returned."),
     );
   }
 
-  for (const page of pages) {
-    const sourcePage = createElement("section", "review-page");
+  for (const page of state.reviewPages) {
     const translatedPage = createElement("section", "review-page");
     const pageNumber = asText(page.original_page_number);
-    sourcePage.dataset.pageNumber = pageNumber;
     translatedPage.dataset.pageNumber = pageNumber;
-    sourcePage.append(makePageLabel(page));
     translatedPage.append(makePageLabel(page));
 
     for (const block of Array.isArray(page.blocks) ? page.blocks : []) {
-      sourcePage.append(makeSourceBlock(block, page));
       translatedPage.append(
         makeTranslationBlock(
           block,
@@ -1264,7 +1326,6 @@ function renderReviewWindow(centerPageNumber, options = {}) {
         ),
       );
     }
-    sourceContent.append(sourcePage);
     translationContent.append(translatedPage);
   }
 
@@ -1274,9 +1335,11 @@ function renderReviewWindow(centerPageNumber, options = {}) {
   }
 
   requestAnimationFrame(() => {
-    const anchorPageNumber = Number(options.anchorPageNumber);
-    if (Number.isInteger(anchorPageNumber)) {
-      const anchorPage = renderedPageElement(translationContent, anchorPageNumber);
+    const requestedPageNumber = Number(
+      options.anchorPageNumber ?? options.resumePageNumber,
+    );
+    if (Number.isInteger(requestedPageNumber)) {
+      const anchorPage = renderedPageElement(translationContent, requestedPageNumber);
       if (anchorPage && Number.isFinite(options.anchorViewportOffset)) {
         const currentOffset =
           anchorPage.getBoundingClientRect().top -
@@ -1296,14 +1359,14 @@ function renderReviewWindow(centerPageNumber, options = {}) {
       );
       block?.querySelector(".translated-editor")?.focus({ preventScroll: true });
     }
+    requestAnimationFrame(() => {
+      state.allowPositionPersistence = true;
+    });
   });
 }
 
 function renderReview(drafts = new Map(), options = {}) {
-  if (state.reviewWindowShiftFrame !== null) {
-    cancelAnimationFrame(state.reviewWindowShiftFrame);
-    state.reviewWindowShiftFrame = null;
-  }
+  state.allowPositionPersistence = false;
   state.reviewDrafts = new Map(drafts);
   state.reviewPages = Array.isArray(state.review?.pages)
     ? [...state.review.pages].sort(
@@ -1318,6 +1381,13 @@ function renderReview(drafts = new Map(), options = {}) {
     asText(state.review?.source_file_name) ||
     asText(state.job?.filename) ||
     asText(state.selectedFile?.name, "Translated PDF");
+  const stableRunId = asText(state.review?.translation_run_id);
+  if (/^[0-9a-f]{32}$/.test(stableRunId)) {
+    state.jobId = stableRunId;
+    window.history.replaceState({}, "", `/?job=${encodeURIComponent(stableRunId)}`);
+  }
+  reviewLibrary.hidden = true;
+  reviewEditor.hidden = false;
   reviewDocument.textContent = filename;
   document.title = `${filename} · ArticleTranslator`;
   exportLink.href = `/api/jobs/${encodeURIComponent(state.jobId)}/export.md`;
@@ -1325,13 +1395,14 @@ function renderReview(drafts = new Map(), options = {}) {
   const focusedPage = options.focusBlockId
     ? state.blockIndex.get(asText(options.focusBlockId))?.page.original_page_number
     : null;
-  renderReviewWindow(
-    options.centerPageNumber ||
+  renderAllReviewPages({
+    ...options,
+    resumePageNumber:
+      options.centerPageNumber ||
       focusedPage ||
-      state.reviewWindowCenter ||
+      Number(state.review?.continue_page) ||
       state.reviewPages[0]?.original_page_number,
-    { ...options, captureDrafts: false },
-  );
+  });
 }
 
 function currentReviewVersion(response, oldVersion) {
@@ -1596,6 +1667,8 @@ async function loadReview(options = {}) {
     `/api/jobs/${encodeURIComponent(state.jobId)}/review`,
   );
   state.review = review || { pages: [] };
+  state.sourcePageNumber = null;
+  state.lastPersistedPage = Number(state.review.continue_page) || null;
   const hasAnchor = options.anchorPageNumber !== undefined;
   renderReview(options.drafts instanceof Map ? options.drafts : new Map(), {
     centerPageNumber: options.centerPageNumber,
@@ -1604,9 +1677,98 @@ async function loadReview(options = {}) {
     focusBlockId: options.focusBlockId,
     resetScroll: !hasAnchor,
   });
-  reviewTab.disabled = false;
-  reviewTab.setAttribute("aria-disabled", "false");
   activateTab("review");
+}
+
+function formatReviewDate(value) {
+  const date = new Date(asText(value));
+  return Number.isNaN(date.getTime())
+    ? ""
+    : new Intl.DateTimeFormat(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }).format(date);
+}
+
+function renderTranslationLibrary(payload) {
+  const reviews = Array.isArray(payload) ? payload : payload?.jobs || payload?.translations || [];
+  reviewList.replaceChildren();
+  reviewListEmpty.hidden = reviews.length > 0;
+  for (const review of reviews) {
+    const jobId = asText(review.job_id || review.translation_run_id);
+    if (!jobId) {
+      continue;
+    }
+    const pageCount = Math.max(1, Number(review.page_count) || 1);
+    const continuePage = Math.min(
+      pageCount,
+      Math.max(1, Number(review.continue_page) || 1),
+    );
+    const card = createElement("article", "review-list-card");
+    card.setAttribute("role", "listitem");
+    const summary = createElement("div");
+    summary.append(createElement("h2", "", asText(review.filename, "Translated PDF")));
+    const details = [`${pageCount} ${pageCount === 1 ? "page" : "pages"}`];
+    const updated = formatReviewDate(review.updated_at);
+    if (updated) {
+      details.push(`Updated ${updated}`);
+    }
+    summary.append(createElement("p", "", details.join(" · ")));
+    const open = createElement(
+      "button",
+      "primary-button compact-control",
+      `Continue from page ${continuePage}`,
+    );
+    open.type = "button";
+    open.dataset.action = "open-review";
+    open.dataset.jobId = jobId;
+    card.append(summary, open);
+    reviewList.append(card);
+  }
+}
+
+async function loadTranslationLibrary({ activate = false } = {}) {
+  try {
+    renderTranslationLibrary(await apiRequest("/api/jobs"));
+  } catch (error) {
+    renderTranslationLibrary([]);
+    showGlobalError(error.message);
+  }
+  if (activate) {
+    reviewEditor.hidden = true;
+    reviewLibrary.hidden = false;
+    reviewDocument.textContent = "";
+    activateTab("review");
+  }
+}
+
+async function openLibraryReview(jobId, button) {
+  clearGlobalError();
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    state.jobId = jobId;
+    state.job = await apiRequest(`/api/jobs/${encodeURIComponent(jobId)}`);
+    state.lastPersistedPage = null;
+    window.history.replaceState({}, "", `/?job=${encodeURIComponent(jobId)}`);
+    await loadReview();
+  } catch (error) {
+    showGlobalError(error.message);
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
+function handleReviewListClick(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const button = target?.closest("[data-action='open-review']");
+  if (!button || !reviewList.contains(button)) {
+    return;
+  }
+  void openLibraryReview(asText(button.dataset.jobId), button);
 }
 
 function elementPositionInScroller(element, scroller) {
@@ -1615,46 +1777,31 @@ function elementPositionInScroller(element, scroller) {
   return elementRect.top - scrollerRect.top + scroller.scrollTop;
 }
 
-function requestReviewWindowShift(pageNumber) {
+function persistReviewPosition(pageNumber) {
   if (
-    state.reviewWindowShiftFrame !== null ||
-    Number(state.reviewWindowCenter) === Number(pageNumber) ||
-    state.renderedPageNumbers.length === 0
+    !state.allowPositionPersistence ||
+    !Number.isInteger(pageNumber) ||
+    state.lastPersistedPage === pageNumber ||
+    !state.jobId
   ) {
     return;
   }
-  const firstRendered = state.renderedPageNumbers[0];
-  const lastRendered = state.renderedPageNumbers.at(-1);
-  const firstDocumentPage = Number(state.reviewPages[0]?.original_page_number);
-  const lastDocumentPage = Number(state.reviewPages.at(-1)?.original_page_number);
-  const needsEarlierPages =
-    Number(pageNumber) === firstRendered && firstRendered > firstDocumentPage;
-  const needsLaterPages =
-    Number(pageNumber) === lastRendered && lastRendered < lastDocumentPage;
-  if (!needsEarlierPages && !needsLaterPages) {
-    return;
-  }
-
-  state.reviewWindowShiftFrame = requestAnimationFrame(() => {
-    state.reviewWindowShiftFrame = null;
-    const activeEditor = document.activeElement?.closest?.(".translated-editor");
-    const focusBlockId = activeEditor
-      ? activeEditor.closest(".translation-block")?.dataset.blockId
-      : null;
-    const anchorPage = renderedPageElement(translationContent, pageNumber);
-    const anchorViewportOffset = anchorPage
-      ? anchorPage.getBoundingClientRect().top -
-        translationScroll.getBoundingClientRect().top
-      : null;
-    const drafts = captureDrafts();
-    state.reviewDrafts = drafts;
-    renderReviewWindow(pageNumber, {
-      anchorPageNumber: pageNumber,
-      anchorViewportOffset,
-      focusBlockId,
-      captureDrafts: false,
+  const jobId = state.jobId;
+  state.lastPersistedPage = pageNumber;
+  state.positionQueue = state.positionQueue
+    .catch(() => undefined)
+    .then(() =>
+      apiRequest(`/api/jobs/${encodeURIComponent(jobId)}/review-position`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ original_page_number: pageNumber }),
+      }),
+    )
+    .catch(() => {
+      if (state.jobId === jobId && state.lastPersistedPage === pageNumber) {
+        state.lastPersistedPage = null;
+      }
     });
-  });
 }
 
 function syncSourceToTranslation() {
@@ -1681,43 +1828,10 @@ function syncSourceToTranslation() {
   activePageLabel.textContent = pageEntry
     ? `Physical page ${pageNumber}${pageEntry.pdf_page_label ? ` · ${pageEntry.pdf_page_label}` : ""}`
     : `Physical page ${pageNumber}`;
-  requestReviewWindowShift(Number(pageNumber));
-
-  const blocks = [...activePage.querySelectorAll(".translation-block")];
-  let activeBlock = blocks[0] || null;
-  for (const block of blocks) {
-    if (elementPositionInScroller(block, translationScroll) <= anchor) {
-      activeBlock = block;
-    } else {
-      break;
-    }
+  if (pageEntry) {
+    showSourcePage(pageEntry);
   }
-
-  for (const sourceBlock of state.sourceElements.values()) {
-    sourceBlock.classList.remove("is-following");
-  }
-  if (activeBlock) {
-    const sourceBlock = state.sourceElements.get(asText(activeBlock.dataset.blockId));
-    if (sourceBlock) {
-      sourceBlock.classList.add("is-following");
-      const translatedTop = elementPositionInScroller(activeBlock, translationScroll);
-      const localProgress = Math.max(
-        0,
-        Math.min(1, (anchor - translatedTop) / Math.max(activeBlock.offsetHeight, 1)),
-      );
-      const sourceTop = elementPositionInScroller(sourceBlock, sourceScroll);
-      sourceScroll.scrollTop =
-        sourceTop + localProgress * sourceBlock.offsetHeight - Math.min(76, sourceScroll.clientHeight / 4);
-      return;
-    }
-  }
-
-  const sourcePage = [...sourceContent.querySelectorAll(".review-page")].find(
-    (page) => page.dataset.pageNumber === pageNumber,
-  );
-  if (sourcePage) {
-    sourceScroll.scrollTop = elementPositionInScroller(sourcePage, sourceScroll);
-  }
+  persistReviewPosition(Number(pageNumber));
 }
 
 function requestScrollSync() {
@@ -1764,6 +1878,7 @@ async function initialize() {
     apiKeyStatus.textContent = "Configuration unavailable.";
     showGlobalError(error.message);
   }
+  await loadTranslationLibrary();
   await restoreJobFromUrl();
 }
 
@@ -1809,17 +1924,14 @@ function resetForNewTranslation() {
   state.review = null;
   state.blockIndex = new Map();
   state.uncertaintyIndex = new Map();
-  state.sourceElements = new Map();
   state.reviewPages = [];
   state.reviewDrafts = new Map();
-  state.reviewWindowCenter = null;
-  state.renderedPageNumbers = [];
-  sourceContent.replaceChildren();
+  state.sourcePageNumber = null;
+  state.allowPositionPersistence = false;
+  state.lastPersistedPage = null;
+  sourcePageImage.removeAttribute("src");
+  fullSizePageLink.href = "#";
   translationContent.replaceChildren();
-  if (state.reviewWindowShiftFrame !== null) {
-    cancelAnimationFrame(state.reviewWindowShiftFrame);
-    state.reviewWindowShiftFrame = null;
-  }
   if (state.scrollFrame !== null) {
     cancelAnimationFrame(state.scrollFrame);
     state.scrollFrame = null;
@@ -1835,17 +1947,40 @@ function resetForNewTranslation() {
   window.history.replaceState({}, "", "/");
   translationSetup.hidden = false;
   jobProgress.hidden = true;
-  reviewTab.disabled = true;
-  reviewTab.setAttribute("aria-disabled", "true");
+  reviewEditor.hidden = true;
+  reviewLibrary.hidden = false;
   activateTab("translate");
   document.title = "ArticleTranslator";
 }
 
 backToSetupButton.addEventListener("click", resetForNewTranslation);
-newTranslationButton.addEventListener("click", resetForNewTranslation);
+newTranslationButton.addEventListener("click", () => {
+  if (state.reviewDrafts.size && !window.confirm("Discard unsaved block edits?")) {
+    return;
+  }
+  resetForNewTranslation();
+});
+reviewList.addEventListener("click", handleReviewListClick);
+refreshTranslationsButton.addEventListener("click", () => {
+  void loadTranslationLibrary({ activate: true });
+});
+backToTranslationsButton.addEventListener("click", () => {
+  if (state.reviewDrafts.size && !window.confirm("Discard unsaved block edits?")) {
+    return;
+  }
+  state.reviewDrafts = new Map();
+  window.history.replaceState({}, "", "/");
+  void loadTranslationLibrary({ activate: true });
+});
 
 for (const button of tabButtons) {
-  button.addEventListener("click", () => activateTab(button.dataset.tab));
+  button.addEventListener("click", () => {
+    if (button.dataset.tab === "review" && reviewEditor.hidden) {
+      void loadTranslationLibrary({ activate: true });
+      return;
+    }
+    activateTab(button.dataset.tab);
+  });
   button.addEventListener("keydown", (event) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       return;
@@ -1886,6 +2021,14 @@ uncertaintyForm.addEventListener("submit", (event) => {
 });
 uncertaintyDialog.addEventListener("cancel", () => {
   state.activeUncertaintyId = null;
+});
+
+window.addEventListener("beforeunload", (event) => {
+  if (!state.reviewDrafts.size) {
+    return;
+  }
+  event.preventDefault();
+  event.returnValue = "";
 });
 
 initialize();

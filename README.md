@@ -1,9 +1,10 @@
 # ArticleTranslator
 
 ArticleTranslator is a local tool for translating and reviewing page-preserving
-PDFs. It turns each physical page into matched Markdown and an image, sends one
-multimodal structured translation request per page, validates the response with
-Pydantic, and compiles the canonical dataset into clean Markdown.
+PDFs. It turns each physical page into matched Markdown and an image, sends a
+structured multimodal page-translation request, conditionally follows it with a
+dedicated table-reconstruction request, validates both responses with Pydantic,
+and compiles the canonical dataset into clean Markdown.
 
 The repository includes the backend pipeline, CLI, and a small tabbed FastAPI
 interface for colleagues. The interface provides PDF upload, per-job language
@@ -18,8 +19,9 @@ multi-user application.
 PDF
   -> split into one-page PDF streams
   -> MarkItDown Markdown + matching rendered PNG per physical page
-  -> one Gemini image+Markdown request per page
-  -> strict structured-output validation and trusted provenance
+  -> one Gemini image+Markdown page-translation request
+  -> when tagged: one batched table-reconstruction request for that page
+  -> strict structured-output validation and per-pass trusted provenance
   -> canonical runs/<translation-run-id>/output/document.json
   -> clean runs/<translation-run-id>/output/document.md
 ```
@@ -28,6 +30,51 @@ MarkItDown does not retain usable page boundaries when converting a complete PDF
 The ingestion adapter therefore splits first and runs MarkItDown once per page.
 The rendered image remains the visual source of truth; extracted Markdown is
 supplemental context, which matters for scans and pages with weak text layers.
+
+### Segment policy for historical pages
+
+The model returns page regions in reading order rather than treating a page as
+one undifferentiated transcription. A table or table-like region is any region
+whose meaning depends on two-dimensional row and column alignment, including
+unruled schedules, registers, statistical arrays, and aligned date, age, or count
+series. The first pass emits each such region as an ordered, text-free tag. If a
+page has one or more tags, the pipeline immediately sends one batched structured
+follow-up containing the same page PNG, that page's complete MarkItDown/OCR, and
+the first-pass segmentation. Only that region is reconstructed: surrounding
+prose, headings, captions, and table notes remain separate translated blocks.
+
+The follow-up produces one target-language GitHub-flavored Markdown table per
+tag. It may apply bounded structural modernization: infer strongly supported
+headers, fill down plainly implied labels, expand ditto marks or shorthand, and
+turn sentence-like records into explicit rows. For example, “3 dead, on 3rd of
+July” followed by “3, 4th” can become a `Date | Deaths` table. This freedom is
+structural only; it must not invent or change facts, names, values, dates, units,
+categories, totals, or rows. A reconstructed table has
+`segment_handling="table_reconstruction"`, machine GFM Markdown in
+`translated_text`, and no claimed `source_text`. Figures remain text-free manual
+insertions for a reviewer.
+
+Footnotes are classified by function, not by font size, position, or share of the
+page. A note may be a short marked passage below a rule, an unmarked continuation,
+or nearly a whole page. Footnote blocks retain an optional printed marker and an
+explicit page-continuation state, and their text is translated. Running heads,
+page numbers, digitizer marks, catchwords, and printer gathering signatures are
+not footnotes.
+
+### Previous-page continuity context
+
+Both passes can receive finalized machine translations from preceding physical
+pages in the same run. `translation.previous_page_context_count` controls the
+window from 0 through 10; the checked-in default is 2. The projection contains
+page identity and ordered source/translated block content, but no prior page
+images, editorial revisions, provider metadata, IDs, hashes, tokens, or
+timestamps. It is delimited as untrusted, read-only context, and the model must
+return only current-page content.
+
+This can resolve a word, sentence, heading, footnote, or table continuation that
+enters the current page. It cannot retroactively change an already finalized
+previous page. The main contract is versioned as `translate-page-v4`; the table
+contract is `reconstruct-tables-v1`.
 
 ## Quick start: local interface
 
@@ -59,23 +106,32 @@ loopback host or port. The interface is organized as an internal workbench:
   style. A Gemini key can be used for the current browser session, or **Save on
   this computer** can store it locally for later sessions. The saved value is
   never returned to or displayed by the interface.
-- **Review** shows original and translated blocks side by side. Scroll the
-  translated side; the original follows the same `original_page_number`. To keep
-  long documents responsive, the browser mounts only the active page plus the
-  configured number of neighboring pages on either side (two by default), then
-  shifts that window as you scroll. Edits create revisions without changing
-  machine output. Uncertain terms are visibly marked and can be corrected once
-  or, when multiple unresolved model-annotated occurrences exist, all at once.
-  The reviewed document can be downloaded as Markdown.
+- **Review** opens with a catalog of every valid completed translation run found
+  under the configured artifact root. A stable translation-run ID reopens the
+  same canonical artifacts after a browser or server restart. The complete
+  translated document is mounted and scrollable; only the active physical
+  page's original PNG is fetched and displayed alongside it. The last physical
+  page visited is stored per run, so the catalog can offer **Continue from page
+  X**. Edits create append-only revisions without changing machine output.
+  Uncertain terms are visibly marked and can be corrected once or, when multiple
+  unresolved model-annotated occurrences exist, all at once. The reviewed
+  document can be downloaded as Markdown.
 
-The configured provider receives one page image and that page's complete
-extracted Markdown for each request. Files, canonical translations, and
-editorial revisions remain in the configured local artifact directory.
+For each request, the configured provider receives one current-page image and
+that page's complete extracted Markdown. A table-bearing page therefore makes a
+second request with the same current-page evidence. Requests can also include the
+configured read-only projection of prior finalized machine translations. Source
+files, canonical translations, and editorial revisions remain in the configured
+local artifact directory.
 
-The web server binds only to a configured loopback address. Its bounded job
-queue and browser job IDs exist only in the running process. There is no
-authentication, remote deployment support, or cancellation, so do not expose it
-on a network.
+The web server binds only to a configured loopback address. A newly submitted
+translation receives a temporary browser job ID; that alias, its progress record,
+and the bounded execution queue exist only in the running process. Completed
+runs are different: the server discovers their canonical artifacts at startup
+and exposes them by stable translation-run ID in Review. This is filesystem
+discovery, not a database or durable task queue. There is no authentication,
+remote deployment support, or cancellation, so do not expose the server on a
+network.
 
 ## CLI workflow
 
@@ -106,8 +162,9 @@ uv run article-translator \
   run data/article.pdf
 ```
 
-A 95-page PDF makes 95 provider requests unless matching page checkpoints
-already exist.
+A 95-page PDF makes 95 primary provider requests plus one table request for each
+table-bearing page, unless matching checkpoints already exist. Multiple tables
+on one page are batched into that page's single follow-up.
 
 ## Staged commands
 
@@ -144,9 +201,10 @@ contains:
 - `faithful`, `balanced`, or `readable` translation style;
 - custom translator instructions and glossary;
 - name, citation, and qualitative uncertainty policies;
+- finalized previous-page translation context count (0–10, default 2);
 - Markdown page-comment and marginalia behavior;
-- loopback web host/port, upload/page/glossary limits, status polling, review-page
-  context window, and bounded local concurrency.
+- loopback web host/port, upload/page/glossary limits, status polling, and bounded
+  local concurrency.
 
 Personal files should use `config/*.local.toml`, which Git ignores. Unknown keys,
 missing settings, invalid enum values, and out-of-range settings fail before work
@@ -170,10 +228,10 @@ flags, never the key value.
 ## Canonical data and output artifacts
 
 The active run's `document.json` is the source of truth for the editor. It
-preserves the translation-run identity, source page, block type, source text,
-machine translation, uncertainty notes, hashes, prompt/model provenance, and
-translation settings. `document.md` is a derived presentation and can be
-regenerated at any time.
+preserves the translation-run identity, source page, block type, source text for
+translated regions, machine translation or reconstructed table Markdown,
+uncertainty notes, hashes, prompt/model provenance, and translation settings.
+`document.md` is a derived presentation and can be regenerated at any time.
 
 ```text
 <configured-artifacts-dir>/<job-id>/
@@ -198,6 +256,8 @@ regenerated at any time.
     │   │   └── p0001-b0001/
     │   │       ├── 0001.json      # append-only editorial revision
     │   │       └── 0002.json
+    │   ├── review/
+    │   │   └── position.json      # mutable last physical page visited
     │   └── output/
     │       ├── document.json      # canonical machine dataset for this run
     │       └── document.md        # clean derived export for this run
@@ -210,21 +270,34 @@ regenerated at any time.
 `detected_printed_page_label` is text visibly printed on the page. They are
 separate because front matter often uses Roman numerals or no printed number.
 
-Page translations are written atomically and independently within one immutable
-translation run. If page 43 fails, pages 1–42 remain valid checkpoints and a
-retry resumes page 43 in the same run. Forced translation appends a new run
-instead of overwriting prior successful bytes. A checkpoint fingerprint includes
-both page hashes, the complete resolved translation settings, provider/model,
-output-affecting provider semantics, prompt content/version, and schema version.
-Operational provider settings are persisted for provenance but do not invalidate
-successful checkpoints.
+Page translations are written atomically within one immutable translation run.
+If a first pass tags tables, its validated `translation.json` is written before
+the table call. It is an intermediate stage checkpoint until every tagged table
+has been reconstructed. If that follow-up fails, `failure.json` records the
+`table_reconstruction` stage and a retry repeats only pass two; it does not repay
+for or potentially change the first-pass segmentation. If page 43 fails, earlier
+finalized page checkpoints remain resumable in the same run. Forced translation
+appends a new run instead of overwriting prior successful bytes.
+
+The first-pass fingerprint includes both page hashes, complete resolved
+translation settings, provider/model and output-affecting provider semantics,
+the exact main prompt and prior-page context, the main/table prompt versions and
+table prompt contract hash, and schema version. The table fingerprint also binds
+the exact table prompt, first-pass fingerprint, and ordered table targets. Main
+and table provider response IDs, token usage, prompt versions, and fingerprints
+are persisted separately as bounded provenance. Operational timeout/retry/size
+settings remain provenance but do not invalidate successful checkpoints.
 
 Editorial changes are separate from machine output. Each block revision is
 created atomically under the active immutable run and includes its expected base
 revision, effective text, review state, and resolved uncertainty IDs. The review
 projection combines machine blocks with the latest valid revision. Downloading
 reviewed Markdown projects that effective view without changing either canonical
-`document.json` or the machine `document.md`.
+`document.json` or the machine `document.md`. The interface labels whether each
+effective block is still the machine translation, was reviewed unchanged, or is
+the result of a manual revision. The run-scoped `review/position.json` sidecar
+stores only the current physical-page cursor; it does not alter the translation
+or revision history.
 
 Preparation is transactional: extraction uses an immutable temporary snapshot of
 the source and publishes a new `<preparation-id>` only after every page pair is
@@ -233,9 +306,15 @@ preparations are retained until a future explicit cleanup policy exists. Forced
 preparation preserves the ordered translation-run index but clears the active run
 so the next translation receives a new identity.
 
-Persisted core artifacts use schema version 2.0. Version 1.0 artifacts predate
-translation-run identity and are rejected explicitly rather than being attached
-to a guessed run.
+New core artifacts use schema version 4.0 for table-reconstruction handling and
+per-pass provenance. The filesystem reader validates and upgrades supported
+schema 2.0 and 3.0 artifacts in memory without rewriting immutable files. Schema
+2.0 translated tables remain explicitly marked legacy translated tables; schema
+3.0 manual table placeholders remain explicitly marked legacy manual tables.
+Neither compatibility form is silently reinterpreted as a schema 4.0
+reconstruction. A translated figure is not valid schema 2.0 legacy data. Version
+1.0 artifacts predate translation-run identity and remain explicitly rejected
+rather than being attached to a guessed run.
 
 ## Repository map
 
@@ -305,8 +384,12 @@ The live Gemini path has not been verified by the automated suite.
 
 ## Current limitations
 
-- Translation is sequential and page-isolated; no adjacent-page context is sent.
+- Translation is sequential. Only finalized preceding same-run page translations
+  are available as context; no following-page image/text is sent, and context
+  cannot retroactively repair a previous page's trailing fragment.
 - Block boundaries and types are model decisions and may vary between runs.
+- Reconstructed tables are model-produced modern GFM structures, not claimed
+  cell-for-cell source transcriptions, and still require editorial review.
 - Weak OCR/text extraction can still affect output, though the page image is also
   supplied.
 - Uncertainty is qualitative because model token probabilities are unavailable;
@@ -315,9 +398,9 @@ The live Gemini path has not been verified by the automated suite.
 - Markdown preserves logical content and provenance, not exact PDF layout.
 - `--force` starts a new immutable translation run; it never overwrites an older
   run's machine checkpoints.
-- The browser job registry, progress state, and bounded queue are process-local;
-  restarting the server loses those handles even though completed artifacts
-  remain on disk.
+- In-progress browser job aliases, progress state, and the bounded queue are
+  process-local and are lost on restart. Valid completed runs remain available
+  through the filesystem-backed Review catalog and their stable run IDs.
 - The interface has no authentication, remote deployment configuration, durable
   task queue, multi-process coordination, or job cancellation. It is deliberately
   restricted to loopback use.

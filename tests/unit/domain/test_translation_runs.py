@@ -49,6 +49,7 @@ def test_manifest_round_trips_ordered_translation_run_index() -> None:
 
     assert restored.translation_run_id == RUN_ID
     assert restored.translation_run_ids == [RUN_ID]
+    assert restored.schema_version == "4.0"
 
 
 def test_manifest_rejects_active_run_outside_ordered_index() -> None:

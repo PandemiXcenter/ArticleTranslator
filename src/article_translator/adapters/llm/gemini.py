@@ -1,16 +1,30 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from google import genai
 from google.genai import errors, types
+from pydantic import BaseModel
 
-from article_translator.domain.models import GeneratedPagePayload
+from article_translator.domain.models import GeneratedPagePayload, GeneratedTablePayload
 from article_translator.ports.translation import (
     PageTranslationRequest,
     ProviderDescriptor,
     ProviderResult,
+    TableReconstructionRequest,
+    TableReconstructionResult,
 )
+
+MultimodalRequest = PageTranslationRequest | TableReconstructionRequest
+
+
+@dataclass(frozen=True, slots=True)
+class _StructuredResponse[PayloadT: BaseModel]:
+    payload: PayloadT
+    response_id: str | None
+    input_tokens: int | None
+    output_tokens: int | None
 
 
 class GeminiPageTranslator:
@@ -56,22 +70,49 @@ class GeminiPageTranslator:
         )
 
     def translate_page(self, request: PageTranslationRequest) -> ProviderResult:
-        image_bytes = request.image_path.read_bytes()
-        encoded_image_bytes = 4 * ((len(image_bytes) + 2) // 3)
-        estimated_request_bytes = encoded_image_bytes + len(request.prompt.encode("utf-8")) + 16_384
-        if estimated_request_bytes >= self._max_inline_request_bytes:
-            raise ValueError(
-                "Gemini inline request would exceed the configured byte limit; "
-                "lower extraction.image_dpi or add a File API transport"
-            )
-
-        image_part = types.Part.from_bytes(
-            data=image_bytes,
-            mime_type=request.image_media_type,
+        response = self._generate_structured(
+            request=request,
+            payload_model=GeneratedPagePayload,
         )
+        return ProviderResult(
+            payload=response.payload,
+            response_id=response.response_id,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+        )
+
+    def reconstruct_tables(
+        self,
+        request: TableReconstructionRequest,
+    ) -> TableReconstructionResult:
+        response = self._generate_structured(
+            request=request,
+            payload_model=GeneratedTablePayload,
+        )
+        return TableReconstructionResult(
+            payload=response.payload,
+            response_id=response.response_id,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+        )
+
+    def _generate_structured[PayloadT: BaseModel](
+        self,
+        *,
+        request: MultimodalRequest,
+        payload_model: type[PayloadT],
+    ) -> _StructuredResponse[PayloadT]:
+        image_bytes = request.image_path.read_bytes()
+        self._guard_inline_request_size(image_bytes=image_bytes, prompt=request.prompt)
         content = types.Content(
             role="user",
-            parts=[image_part, types.Part.from_text(text=request.prompt)],
+            parts=[
+                types.Part.from_bytes(
+                    data=image_bytes,
+                    mime_type=request.image_media_type,
+                ),
+                types.Part.from_text(text=request.prompt),
+            ],
         )
         try:
             response = self._client.models.generate_content(
@@ -79,7 +120,7 @@ class GeminiPageTranslator:
                 contents=content,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    response_json_schema=GeneratedPagePayload.model_json_schema(),
+                    response_json_schema=payload_model.model_json_schema(),
                 ),
             )
         except errors.APIError as exc:
@@ -89,17 +130,26 @@ class GeminiPageTranslator:
         if parsed is None:
             if not response.text:
                 raise ValueError("Gemini returned neither parsed structured data nor response text")
-            payload = GeneratedPagePayload.model_validate_json(response.text)
+            payload = payload_model.model_validate_json(response.text)
         else:
-            payload = GeneratedPagePayload.model_validate(parsed)
+            payload = payload_model.model_validate(parsed)
 
         usage = response.usage_metadata
-        return ProviderResult(
+        return _StructuredResponse(
             payload=payload,
             response_id=response.response_id,
             input_tokens=usage.prompt_token_count if usage is not None else None,
             output_tokens=usage.candidates_token_count if usage is not None else None,
         )
+
+    def _guard_inline_request_size(self, *, image_bytes: bytes, prompt: str) -> None:
+        encoded_image_bytes = 4 * ((len(image_bytes) + 2) // 3)
+        estimated_request_bytes = encoded_image_bytes + len(prompt.encode("utf-8")) + 16_384
+        if estimated_request_bytes >= self._max_inline_request_bytes:
+            raise ValueError(
+                "Gemini inline request would exceed the configured byte limit; "
+                "lower extraction.image_dpi or add a File API transport"
+            )
 
     def close(self) -> None:
         self._client.close()

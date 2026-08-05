@@ -15,9 +15,14 @@ Implemented:
 - versioned Pydantic machine and provider payloads;
 - page-preserving MarkItDown extraction and matching PNG rendering;
 - structured Gemini image+Markdown adapter;
+- conditional structured table-reconstruction adapter using the same page image
+  and complete MarkItDown/OCR;
 - qualitative uncertain-term output;
-- immutable translation runs, per-page atomic checkpoints, and safe resume;
+- immutable translation runs, per-page atomic checkpoints, intermediate
+  first-pass table checkpoints, and stage-aware safe resume;
 - canonical JSON dataset and deterministic machine Markdown compiler;
+- schema 4.0 table-reconstruction contracts and read-only schema 2.0/3.0
+  compatibility migrations;
 - unit, local-integration, and fake-provider end-to-end tests.
 
 Still required before production claims:
@@ -37,17 +42,35 @@ Implemented:
 
 - strict per-page structured output with block types and qualitative
   uncertainties;
+- corpus-informed segment rules: two-dimensional tables and table-like regions
+  become ordered text-free first-pass tags, while surrounding prose, captions,
+  and notes remain translated;
+- one immediate batched second pass per table-bearing page, receiving the same
+  PNG and complete page OCR plus first-pass segmentation;
+- target-language GFM table reconstruction with bounded modernization of
+  sentence-like records, shorthand, repeated labels, and supported headers,
+  without permission to invent or alter facts;
+- reconstructed table provenance and
+  `segment_handling="table_reconstruction"`, with machine Markdown but no claim
+  of exact cell-level `source_text`; figures remain manual insertions;
+- functional footnote classification with optional markers and explicit
+  continuation metadata for short, full-page, and cross-page notes;
+- TOML-configured context from 0–10 finalized preceding same-run machine page
+  translations (default 2), shared by primary and table prompts and constrained
+  to current-page-only output;
 - configured glossary plus an authoritative per-job Term mappings table;
 - per-job input/output languages, style, and allowlisted Gemini model, with TOML
   defaults (Danish to English in the checked-in config);
-- prompt/checkpoint versioning for translation-affecting settings.
+- distinct main/table prompt versions, hashes, provenance, and checkpoint
+  invalidation for translation-affecting settings and context.
 
 Deferred:
 
 - evaluate and tune output on a representative corpus of historical Danish
   material;
 - reusable named glossary files and document-level terminology packages;
-- neighboring-page context that preserves independent page checkpoint semantics;
+- optional forward-looking context or a reviewed mechanism for retroactively
+  repairing a previous page's trailing fragment;
 - source-coverage and duplicate-block diagnostics;
 - opt-in schema repair with a strict attempt/cost cap;
 - additional provider adapters, added only when a concrete need exists.
@@ -62,7 +85,13 @@ Implemented:
 - atomic revision creation, contiguous history validation, and optimistic base
   versions;
 - effective review documents that retain machine text unchanged;
+- manual-insertion regions that begin without fabricated machine text and accept
+  reviewer content only through append-only revisions (figures and migrated
+  legacy manual tables); reconstructed tables instead begin with machine GFM
+  Markdown and can be revised through the same append-only mechanism;
 - review states and service support for editor/note metadata;
+- a run-scoped physical-page review cursor stored outside canonical machine data
+  and revision history;
 - stable uncertainty highlighting with exact offsets and structured fallback;
 - one-occurrence correction and all-occurrence correction only for multiple
   unresolved model-annotated matches;
@@ -85,6 +114,8 @@ Implemented:
 
 - FastAPI routes for safe public configuration, PDF upload, job progress, review
   projection, block revision, uncertainty replacement, and Markdown download;
+- startup discovery and validation of completed canonical runs under the artifact
+  root, exposed to Review by stable translation-run ID;
 - bounded background execution in one process;
 - upload size/type/name validation, opaque staging directories, cleanup, CSRF
   checks, no-store headers, and redacted public errors;
@@ -95,7 +126,7 @@ Implemented:
 
 Deferred:
 
-- durable job registry, recovery, discovery, and queue persistence;
+- durable in-progress job registry, queue persistence, and recovery;
 - job cancellation and per-document execution locks;
 - SQLite or another database adapter after access patterns justify it;
 - multi-process workers;
@@ -112,17 +143,20 @@ Implemented:
 - allowlisted Gemini model, translation style, and key controls;
 - side-by-side original/effective translation blocks grouped by
   `original_page_number`;
-- translated-pane-driven source synchronization;
-- an active-page review window with two configurable context pages on either
-  side, draft-preserving boundary shifts, and delegated generated-control events;
+- an always-available completed-run catalog with **Continue from page X** after a
+  browser or server restart;
+- the full translated document mounted for review, with translated-pane-driven
+  synchronization that fetches and displays only the active original page PNG;
+- delegated generated-control events;
 - block editing and validation backed by append-only revisions;
+- visible provenance distinguishing machine translations (including reconstructed
+  tables), reviewed-unchanged blocks, and manually edited revisions;
 - visible qualitative uncertainty details and conditional Translate One /
   Translate All correction;
 - reviewed Markdown download.
 
 Deferred:
 
-- reopening completed jobs after a server restart;
 - cancellation and per-page retry controls in the browser;
 - filters for unreviewed, uncertain, failed, or changed blocks;
 - block type editing, split/merge, revision history, and reviewer identity UI;

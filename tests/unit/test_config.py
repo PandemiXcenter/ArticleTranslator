@@ -22,13 +22,13 @@ def test_default_toml_is_the_complete_non_secret_configuration() -> None:
     assert config.translation.style is TranslationStyle.BALANCED
     assert config.translation.source_language == "Danish"
     assert config.translation.target_language == "English"
+    assert config.translation.previous_page_context_count == 2
     assert config.extraction.image_dpi == 150
     assert config.export.include_page_comments is True
     assert config.paths.artifacts_dir == Path("artifacts").resolve()
     assert config.web.host == "127.0.0.1"
     assert config.web.max_concurrent_jobs == 1
     assert config.web.max_pdf_pages == 500
-    assert config.web.review_context_pages == 2
 
 
 def test_unknown_config_keys_fail_fast(tmp_path: Path) -> None:
@@ -67,6 +67,25 @@ def test_missing_nested_setting_is_rejected(tmp_path: Path) -> None:
         load_project_config(path)
 
 
+def test_previous_page_context_count_is_required_and_bounded(tmp_path: Path) -> None:
+    source = Path("config/default.toml").read_text(encoding="utf-8")
+    missing = tmp_path / "missing-context-count.toml"
+    missing.write_text(
+        source.replace("previous_page_context_count = 2\n", ""),
+        encoding="utf-8",
+    )
+    invalid = tmp_path / "invalid-context-count.toml"
+    invalid.write_text(
+        source.replace("previous_page_context_count = 2", "previous_page_context_count = 11"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="previous_page_context_count"):
+        load_project_config(missing)
+    with pytest.raises(ConfigurationError, match="less than or equal to 10"):
+        load_project_config(invalid)
+
+
 def test_blank_gemini_key_is_not_treated_as_a_configured_secret() -> None:
     with pytest.raises(ValidationError, match="at least 1"):
         SecretSettings.model_validate({"GEMINI_API_KEY": ""})
@@ -97,18 +116,4 @@ def test_web_server_rejects_non_loopback_host(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ConfigurationError, match=r"web\.host"):
-        load_project_config(path)
-
-
-def test_review_context_requires_at_least_one_neighboring_page(
-    tmp_path: Path,
-) -> None:
-    source = Path("config/default.toml").read_text(encoding="utf-8")
-    path = tmp_path / "invalid-review-window.toml"
-    path.write_text(
-        source.replace("review_context_pages = 2", "review_context_pages = 0"),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ConfigurationError, match=r"web\.review_context_pages"):
         load_project_config(path)

@@ -5,9 +5,16 @@ from datetime import UTC, datetime
 import pytest
 
 from article_translator.application.editorial import EditorialService
-from article_translator.domain.editorial import BlockRevision
-from article_translator.domain.enums import BlockType, ExtractionStatus
+from article_translator.domain.editorial import BlockRevision, ReviewPosition
+from article_translator.domain.enums import (
+    BlockType,
+    ExtractionStatus,
+    ManualInsertionReason,
+    SegmentContinuation,
+    SegmentHandling,
+)
 from article_translator.domain.errors import (
+    EditorialTargetError,
     ReplaceAllUnavailableError,
     RevisionConflictError,
 )
@@ -17,6 +24,7 @@ from article_translator.domain.models import (
     MarkdownExportSettings,
     PageTranslation,
     ProviderMetadata,
+    TableReconstructionMetadata,
     TranslatedBlock,
     TranslationSettings,
     UncertainTerm,
@@ -29,6 +37,7 @@ RUN_ID = "1" * 32
 class MemoryRevisionRepository:
     def __init__(self) -> None:
         self.revisions: dict[tuple[str, str, str], list[BlockRevision]] = {}
+        self.position: ReviewPosition | None = None
 
     def list_block_revisions(
         self,
@@ -41,6 +50,20 @@ class MemoryRevisionRepository:
     def append_block_revision(self, revision: BlockRevision) -> None:
         key = (revision.document_id, revision.translation_run_id, revision.block_id)
         self.revisions.setdefault(key, []).append(revision)
+
+    def read_review_position(
+        self,
+        document_id: str,
+        translation_run_id: str,
+    ) -> ReviewPosition | None:
+        if self.position is None:
+            return None
+        assert self.position.document_id == document_id
+        assert self.position.translation_run_id == translation_run_id
+        return self.position
+
+    def write_review_position(self, position: ReviewPosition) -> None:
+        self.position = position
 
 
 def _artifact(path: str, media_type: str) -> ArtifactRef:
@@ -77,6 +100,22 @@ def _block(
     )
 
 
+def _manual_table_block() -> TranslatedBlock:
+    return TranslatedBlock(
+        block_id="p0001-b0001",
+        original_page_number=1,
+        order=1,
+        type=BlockType.TABLE,
+        source_text=None,
+        translated_text=None,
+        segment_handling=SegmentHandling.MANUAL_INSERTION,
+        manual_insertion_reason=ManualInsertionReason.TABLE,
+        continuation=SegmentContinuation.COMPLETE,
+        classification_review_required=True,
+        legacy_manual_table=True,
+    )
+
+
 def _document(*blocks: TranslatedBlock) -> DocumentTranslation:
     page_fields: dict[str, object] = {
         "original_page_number": 1,
@@ -97,6 +136,22 @@ def _document(*blocks: TranslatedBlock) -> DocumentTranslation:
         "translated_at": datetime(2026, 1, 1, tzinfo=UTC),
         "translation_run_id": RUN_ID,
     }
+    reconstructed_ids = [
+        block.block_id
+        for block in blocks
+        if block.segment_handling is SegmentHandling.TABLE_RECONSTRUCTION
+    ]
+    if reconstructed_ids:
+        page_fields["table_reconstruction"] = TableReconstructionMetadata(
+            input_fingerprint=HASH,
+            block_ids=reconstructed_ids,
+            provider=ProviderMetadata(
+                provider="fake",
+                model="fake-model",
+                prompt_version="reconstruct-tables-v1",
+            ),
+            reconstructed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
     document_fields: dict[str, object] = {
         "document_id": HASH,
         "job_id": "job-one",
@@ -136,6 +191,39 @@ def test_review_projection_keeps_source_machine_text_and_physical_page() -> None
         "p0001-b0001-u0001-o0002",
     ]
     assert all(item.can_replace_all for item in block.uncertainty_highlights)
+
+
+def test_review_position_is_run_scoped_and_validated_against_physical_pages() -> None:
+    document = _document(_block("p0001-b0001", 1, "kilde", "machine"))
+    repository = MemoryRevisionRepository()
+    service = EditorialService(repository)
+
+    assert service.get_review_position(document, RUN_ID) is None
+
+    saved = service.save_review_position(document, RUN_ID, 1)
+
+    assert saved.document_id == document.document_id
+    assert saved.translation_run_id == RUN_ID
+    assert saved.original_page_number == 1
+    assert service.get_review_position(document, RUN_ID) == saved
+
+    with pytest.raises(EditorialTargetError, match="outside this 1-page document"):
+        service.save_review_position(document, RUN_ID, 2)
+    with pytest.raises(EditorialTargetError, match="belongs to translation run"):
+        service.save_review_position(document, "2" * 32, 1)
+
+
+def test_out_of_range_persisted_review_position_is_rejected() -> None:
+    document = _document(_block("p0001-b0001", 1, "kilde", "machine"))
+    repository = MemoryRevisionRepository()
+    repository.position = ReviewPosition(
+        document_id=document.document_id,
+        translation_run_id=RUN_ID,
+        original_page_number=2,
+    )
+
+    with pytest.raises(EditorialTargetError, match="outside this 1-page document"):
+        EditorialService(repository).get_review_position(document, RUN_ID)
 
 
 def test_highlight_offsets_are_explicit_unicode_codepoint_indexes() -> None:
@@ -252,6 +340,93 @@ def test_manual_revision_is_append_only_and_uses_optimistic_base() -> None:
             "stale edit",
             expected_base_revision=0,
         )
+
+
+def test_manual_insertion_starts_empty_and_exports_only_reviewer_text() -> None:
+    document = _document(_manual_table_block())
+    service = EditorialService(MemoryRevisionRepository())
+
+    initial = service.review_document(document, RUN_ID).pages[0].blocks[0]
+
+    assert initial.segment_handling is SegmentHandling.MANUAL_INSERTION
+    assert initial.source_text is None
+    assert initial.machine_translated_text is None
+    assert initial.effective_translated_text == ""
+    assert initial.manual_insertion_reason is ManualInsertionReason.TABLE
+    assert initial.continuation is SegmentContinuation.COMPLETE
+    assert initial.classification_review_required is True
+
+    unresolved = service.compile_reviewed_markdown(
+        document,
+        RUN_ID,
+        MarkdownExportSettings(include_page_comments=False),
+    )
+    assert "Manual insertion required" in unresolved
+
+    service.revise_block(
+        document,
+        RUN_ID,
+        "p0001-b0001",
+        "| Age | Cases |\n| --- | --- |\n| 20 | 4 |",
+        expected_base_revision=0,
+    )
+
+    current = service.review_document(document, RUN_ID).pages[0].blocks[0]
+    assert current.machine_translated_text is None
+    assert current.effective_translated_text.startswith("| Age |")
+    reviewed = service.compile_reviewed_markdown(
+        document,
+        RUN_ID,
+        MarkdownExportSettings(include_page_comments=False),
+    )
+    assert reviewed == "| Age | Cases |\n| --- | --- |\n| 20 | 4 |\n"
+    assert document.pages[0].blocks[0].translated_text is None
+
+
+def test_reconstructed_table_starts_from_machine_markdown_and_keeps_revision_history() -> None:
+    machine = "| Date | Deaths |\n| --- | ---: |\n| 3 July | 3 |"
+    table = TranslatedBlock(
+        block_id="p0001-b0001",
+        original_page_number=1,
+        order=1,
+        type=BlockType.TABLE,
+        source_text=None,
+        translated_text=machine,
+        segment_handling=SegmentHandling.TABLE_RECONSTRUCTION,
+        manual_insertion_reason=ManualInsertionReason.TABLE_LIKE,
+        continuation=SegmentContinuation.COMPLETE,
+    )
+    document = _document(table)
+    service = EditorialService(MemoryRevisionRepository())
+
+    initial = service.review_document(document, RUN_ID).pages[0].blocks[0]
+    assert initial.segment_handling is SegmentHandling.TABLE_RECONSTRUCTION
+    assert initial.source_text is None
+    assert initial.machine_translated_text == machine
+    assert initial.effective_translated_text == machine
+
+    revised = f"{machine}\n| 4 July | 3 |"
+    revision = service.revise_block(
+        document,
+        RUN_ID,
+        table.block_id,
+        revised,
+        expected_base_revision=0,
+    )
+
+    assert revision.revision_number == 1
+    current = service.review_document(document, RUN_ID).pages[0].blocks[0]
+    assert current.machine_translated_text == machine
+    assert current.effective_translated_text == revised
+    assert document.pages[0].blocks[0].translated_text == machine
+    assert (
+        service.compile_reviewed_markdown(
+            document,
+            RUN_ID,
+            MarkdownExportSettings(include_page_comments=False),
+        )
+        == f"{revised}\n"
+    )
 
 
 def test_translate_all_changes_only_machine_annotated_occurrences() -> None:

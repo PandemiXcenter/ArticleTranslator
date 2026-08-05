@@ -5,7 +5,13 @@ from typing import Literal, Self
 
 from pydantic import Field, model_validator
 
-from article_translator.domain.enums import BlockType, ReviewStatus
+from article_translator.domain.enums import (
+    BlockType,
+    ManualInsertionReason,
+    ReviewStatus,
+    SegmentContinuation,
+    SegmentHandling,
+)
 from article_translator.domain.models import (
     ContractModel,
     NonEmptyText,
@@ -39,6 +45,16 @@ class BlockRevision(ContractModel):
         if len(self.resolved_uncertainty_ids) != len(set(self.resolved_uncertainty_ids)):
             raise ValueError("resolved_uncertainty_ids must be unique")
         return self
+
+
+class ReviewPosition(ContractModel):
+    """Last physical page visited while reviewing one immutable translation run."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    document_id: Sha256
+    translation_run_id: TranslationRunId
+    original_page_number: int = Field(ge=1)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class UncertaintyHighlight(ContractModel):
@@ -85,9 +101,14 @@ class ReviewBlock(ContractModel):
     original_page_number: int = Field(ge=1)
     order: int = Field(ge=1)
     type: BlockType
-    source_text: NonEmptyText
-    machine_translated_text: NonEmptyText
-    effective_translated_text: NonEmptyText
+    segment_handling: SegmentHandling
+    source_text: NonEmptyText | None
+    machine_translated_text: NonEmptyText | None
+    effective_translated_text: str
+    manual_insertion_reason: ManualInsertionReason | None = None
+    footnote_marker: str | None = None
+    continuation: SegmentContinuation | None = None
+    classification_review_required: bool = False
     latest_revision_number: int = Field(ge=0)
     review_status: ReviewStatus
     uncertainty_highlights: list[UncertaintyHighlight] = Field(default_factory=list)
@@ -95,6 +116,47 @@ class ReviewBlock(ContractModel):
 
     @model_validator(mode="after")
     def highlights_must_match_effective_text(self) -> Self:
+        if self.segment_handling is SegmentHandling.MANUAL_INSERTION:
+            if self.type not in {BlockType.TABLE, BlockType.FIGURE}:
+                raise ValueError("manual insertion review blocks must be tables or figures")
+            if self.manual_insertion_reason is None or self.continuation is None:
+                raise ValueError("manual insertion review blocks must retain segment metadata")
+            if self.source_text is not None or self.machine_translated_text is not None:
+                raise ValueError("manual insertion review blocks cannot contain machine text")
+            if self.latest_revision_number == 0 and self.effective_translated_text:
+                raise ValueError("unrevised manual insertion blocks must have empty effective text")
+            if self.latest_revision_number > 0 and not self.effective_translated_text.strip():
+                raise ValueError("revised manual insertion blocks must contain editorial text")
+            if self.uncertainty_highlights or self.uncertainty_fallbacks:
+                raise ValueError("manual insertion review blocks cannot contain text uncertainty")
+        elif self.segment_handling is SegmentHandling.TABLE_RECONSTRUCTION:
+            if self.type is not BlockType.TABLE:
+                raise ValueError("reconstructed review blocks must be tables")
+            if self.source_text is not None:
+                raise ValueError("reconstructed table review blocks do not claim source text")
+            if self.machine_translated_text is None or not self.effective_translated_text.strip():
+                raise ValueError("reconstructed table review blocks require machine Markdown")
+            if self.manual_insertion_reason not in {
+                ManualInsertionReason.TABLE,
+                ManualInsertionReason.TABLE_LIKE,
+            }:
+                raise ValueError("reconstructed tables must retain their table-region reason")
+            if self.continuation is None:
+                raise ValueError("reconstructed tables must retain continuation metadata")
+        elif (
+            self.source_text is None
+            or self.machine_translated_text is None
+            or not self.effective_translated_text.strip()
+        ):
+            raise ValueError("translated review blocks must contain source and translated text")
+        elif self.manual_insertion_reason is not None:
+            raise ValueError("translated review blocks cannot state a manual insertion reason")
+        if (
+            self.segment_handling is SegmentHandling.TRANSLATE
+            and self.type is not BlockType.FOOTNOTE
+            and (self.footnote_marker is not None or self.continuation is not None)
+        ):
+            raise ValueError("footnote metadata is valid only for footnote review blocks")
         highlight_ids = [item.uncertainty_id for item in self.uncertainty_highlights]
         if len(highlight_ids) != len(set(highlight_ids)):
             raise ValueError("uncertainty highlight IDs must be unique within a block")

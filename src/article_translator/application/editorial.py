@@ -15,6 +15,7 @@ from article_translator.domain.editorial import (
     ReviewBlock,
     ReviewDocument,
     ReviewPage,
+    ReviewPosition,
     UncertaintyFallback,
     UncertaintyHighlight,
 )
@@ -31,7 +32,7 @@ from article_translator.domain.models import (
     TranslatedBlock,
     UncertainTerm,
 )
-from article_translator.ports.editorial import RevisionRepository
+from article_translator.ports.editorial import EditorialRepository, RevisionRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,9 +64,41 @@ _REVISION_LOCK = RLock()
 class EditorialService:
     """Build effective review views and append optimistic editorial revisions."""
 
-    def __init__(self, repository: RevisionRepository) -> None:
+    def __init__(self, repository: EditorialRepository) -> None:
         self._repository = repository
         self._lock = _REVISION_LOCK
+
+    def get_review_position(
+        self,
+        document: DocumentTranslation,
+        translation_run_id: str,
+    ) -> ReviewPosition | None:
+        with self._lock:
+            _assert_document_run(document, translation_run_id)
+            position = self._repository.read_review_position(
+                document.document_id,
+                translation_run_id,
+            )
+            if position is not None:
+                _assert_review_page(document, position.original_page_number)
+            return position
+
+    def save_review_position(
+        self,
+        document: DocumentTranslation,
+        translation_run_id: str,
+        original_page_number: int,
+    ) -> ReviewPosition:
+        with self._lock:
+            _assert_document_run(document, translation_run_id)
+            _assert_review_page(document, original_page_number)
+            position = ReviewPosition(
+                document_id=document.document_id,
+                translation_run_id=translation_run_id,
+                original_page_number=original_page_number,
+            )
+            self._repository.write_review_position(position)
+            return position
 
     def review_document(
         self,
@@ -210,21 +243,11 @@ class EditorialService:
                 block.block_id: block.effective_translated_text
                 for block in _iter_review_blocks(review)
             }
-            pages = [
-                page.model_copy(
-                    update={
-                        "blocks": [
-                            block.model_copy(
-                                update={"translated_text": effective_text[block.block_id]}
-                            )
-                            for block in page.blocks
-                        ]
-                    }
-                )
-                for page in document.pages
-            ]
-            effective_document = document.model_copy(update={"pages": pages})
-            return compile_markdown(effective_document, settings)
+            return compile_markdown(
+                document,
+                settings,
+                editorial_overrides=effective_text,
+            )
 
     def _review_document_unlocked(
         self,
@@ -254,7 +277,7 @@ class EditorialService:
                 status = latest.status
                 resolved_ids = set(latest.resolved_uncertainty_ids)
             else:
-                effective_text = block.translated_text
+                effective_text = block.translated_text or ""
                 latest_number = 0
                 status = ReviewStatus.UNREVIEWED
                 resolved_ids = set()
@@ -277,7 +300,7 @@ class EditorialService:
         for block in _iter_machine_blocks(document):
             effective_text, _, _, resolved_ids = block_states[block.block_id]
             highlights, newly_unlocated = _locate_unresolved_specs(
-                block.translated_text,
+                block.translated_text or "",
                 effective_text,
                 specs_by_block[block.block_id],
                 resolved_ids,
@@ -315,9 +338,14 @@ class EditorialService:
                         original_page_number=block.original_page_number,
                         order=block.order,
                         type=block.type,
+                        segment_handling=block.segment_handling,
                         source_text=block.source_text,
                         machine_translated_text=block.translated_text,
                         effective_translated_text=effective_text,
+                        manual_insertion_reason=block.manual_insertion_reason,
+                        footnote_marker=block.footnote_marker,
+                        continuation=block.continuation,
+                        classification_review_required=block.classification_review_required,
                         latest_revision_number=revision_number,
                         review_status=status,
                         uncertainty_highlights=highlights_by_block[block.block_id],
@@ -361,6 +389,17 @@ def _assert_document_run(
         raise EditorialTargetError(
             f"Document belongs to translation run {document.translation_run_id}, "
             f"not {translation_run_id}"
+        )
+
+
+def _assert_review_page(
+    document: DocumentTranslation,
+    original_page_number: int,
+) -> None:
+    if original_page_number < 1 or original_page_number > document.page_count:
+        raise EditorialTargetError(
+            f"Physical page {original_page_number} is outside this "
+            f"{document.page_count}-page document"
         )
 
 
@@ -438,6 +477,8 @@ def _resolved_ids_for_block(
 def _machine_uncertainty_specs(
     block: TranslatedBlock,
 ) -> tuple[list[_UncertaintySpec], list[_FallbackSpec]]:
+    if block.translated_text is None:
+        return [], []
     specs: list[_UncertaintySpec] = []
     unlocated: list[_FallbackSpec] = []
     seen_terms: set[tuple[str, str | None]] = set()

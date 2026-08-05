@@ -7,6 +7,8 @@ from article_translator.ports.translation import (
     PageTranslator,
     ProviderDescriptor,
     ProviderResult,
+    TableReconstructionRequest,
+    TableReconstructionResult,
 )
 
 __all__ = [
@@ -16,4 +18,6 @@ __all__ = [
     "PageTranslator",
     "ProviderDescriptor",
     "ProviderResult",
+    "TableReconstructionRequest",
+    "TableReconstructionResult",
 ]

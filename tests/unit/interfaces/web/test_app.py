@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -15,6 +16,7 @@ from article_translator.application.web_jobs import (
     WebJobNotFoundError,
     WebJobSnapshot,
     WebJobStatus,
+    WebReviewSnapshot,
 )
 from article_translator.config import ProjectConfig, load_project_config
 from article_translator.interfaces.web import create_app
@@ -69,6 +71,19 @@ class RecordingJobManager:
             raise WebJobNotFoundError("Translation job was not found")
         return self.snapshot
 
+    def list_reviews(self) -> list[WebReviewSnapshot]:
+        return [
+            WebReviewSnapshot(
+                job_id="b" * 32,
+                status=WebJobStatus.READY,
+                filename="completed.pdf",
+                page_count=95,
+                continue_page=42,
+                translation_run_id="b" * 32,
+                updated_at=datetime(2026, 8, 4, 12, tzinfo=UTC),
+            )
+        ]
+
     def shutdown(self) -> None:
         return None
 
@@ -100,7 +115,7 @@ def test_index_and_public_config_never_expose_secret(tmp_path: Path) -> None:
         "Input language",
         "Output language",
         "Save on this computer",
-        "Original text",
+        "Original page",
         "Translated text",
         "Translate One",
         "Translate All",
@@ -116,7 +131,7 @@ def test_index_and_public_config_never_expose_secret(tmp_path: Path) -> None:
     assert payload["translation"]["target_language"] == "English"
     assert payload["provider"]["model"] == "gemini-3.6-flash"
     assert "gemini-3.5-flash-lite" in payload["provider"]["selectable_models"]
-    assert payload["limits"]["review_context_pages"] == 2
+    assert "review_context_pages" not in payload["limits"]
 
 
 def test_blank_environment_key_does_not_prevent_settings_page(
@@ -139,7 +154,31 @@ def test_blank_environment_key_does_not_prevent_settings_page(
     assert response.json()["api_key_configured"] is False
 
 
-def test_review_frontend_uses_a_page_window_and_delegated_handlers(
+def test_review_catalog_returns_stable_completed_runs(tmp_path: Path) -> None:
+    config = configured_for_tmp(tmp_path)
+    manager = RecordingJobManager()
+    app = create_app(config, job_manager=cast(WebJobManager, manager))
+
+    with TestClient(app) as client:
+        response = client.get("/api/jobs")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "jobs": [
+            {
+                "job_id": "b" * 32,
+                "status": "ready",
+                "filename": "completed.pdf",
+                "page_count": 95,
+                "continue_page": 42,
+                "translation_run_id": "b" * 32,
+                "updated_at": "2026-08-04T12:00:00Z",
+            }
+        ]
+    }
+
+
+def test_review_frontend_mounts_all_pages_and_uses_delegated_handlers(
     tmp_path: Path,
 ) -> None:
     config = configured_for_tmp(tmp_path)
@@ -147,16 +186,25 @@ def test_review_frontend_uses_a_page_window_and_delegated_handlers(
     app = create_app(config, job_manager=cast(WebJobManager, manager))
 
     with TestClient(app) as client:
+        html = client.get("/").text
         javascript = client.get("/assets/app.js").text
 
-    assert "state.config?.limits?.review_context_pages" in javascript
-    assert "function renderReviewWindow" in javascript
-    assert "function requestReviewWindowShift" in javascript
+    assert "review_context_pages" not in javascript
+    assert "function renderAllReviewPages" in javascript
+    assert "function requestReviewWindowShift" not in javascript
+    assert "for (const page of state.reviewPages)" in javascript
+    assert "function showSourcePage" in javascript
+    assert "function persistReviewPosition" in javascript
+    assert 'reviewList.addEventListener("click", handleReviewListClick)' in javascript
     assert "state.reviewDrafts.get" in javascript
     assert 'translationContent.addEventListener("click", handleReviewClick)' in javascript
     assert 'translationContent.addEventListener("input", handleReviewInput)' in javascript
     assert 'translationContent.addEventListener("paste", handleReviewPaste)' in javascript
     assert 'mappingBody.addEventListener("click", handleMappingClick)' in javascript
+    assert "Machine-reconstructed table" in javascript
+    assert "Show original machine reconstruction" in javascript
+    assert "Table-bearing pages send that page again" in html
+    assert "previous_page_context_count" in javascript
 
     mapping_factory = javascript.split("function addMapping", 1)[1].split(
         "function handleMappingClick",

@@ -8,7 +8,8 @@ ArticleTranslator is a page-preserving PDF translation pipeline with a local
 FastAPI workbench for colleagues. The active architecture is:
 
 ```text
-PDF -> paired per-page Markdown + PNG -> one structured LLM call per page
+PDF -> paired per-page Markdown + PNG -> structured page translation pass
+    -> conditional batched table reconstruction pass for that page
     -> canonical validated document JSON -> immutable translation run
     -> append-only editorial revisions -> reviewed Markdown projection
 ```
@@ -114,23 +115,54 @@ Markdown.
 - Treat the rendered image as primary page evidence and MarkItDown Markdown as
   supplemental context. Empty Markdown must not remove an image page.
 - Every provider request contains exactly one page image and the complete
-  Markdown for that page.
-- The model owns segmentation, order, block type, source text, translated text,
-  optional printed label, and qualitative uncertainty only.
+  Markdown for that page. Prior-page continuity context never adds another page
+  image or replaces the complete current-page Markdown.
+- The first model pass owns segmentation, order, block type, translated-region
+  source/text, optional printed label, qualitative uncertainty, segment
+  continuation, and classification-review flags only. It emits table,
+  table-like, and figure regions as ordered text-free tags. Never smuggle their
+  contents into another first-pass block.
+- A table-bearing page immediately receives one batched structured table pass for
+  all of its tagged table and table-like regions. That pass receives the same PNG
+  and complete page Markdown/OCR. It may modernize historical shorthand into a
+  useful target-language GFM row/column structure, but it must preserve supported
+  facts and must never invent names, values, dates, units, categories, totals, or
+  rows.
+- Reconstructed table blocks use
+  `segment_handling="table_reconstruction"`, retain their region reason and
+  continuation metadata, contain machine GFM Markdown in `translated_text`, and
+  keep `source_text` null because the pipeline does not claim an exact cell-level
+  transcription. Figures remain text-free manual insertions.
+- Previous-page context contains only the configured number of finalized,
+  preceding, same-run machine page translations. It is a read-only projection of
+  page identity and ordered block content: no prior images, editorial revisions,
+  provider metadata, IDs, hashes, tokens, or timestamps. Prompts must require
+  current-page-only output and must never repeat, revise, or move prior content.
+  This context can help interpret split words and continuations on the current
+  page; it cannot retroactively repair a previously finalized page.
 - The pipeline owns IDs, physical page provenance, hashes, provider/model,
   prompt/schema versions, token metadata, timestamps, and fingerprints.
 - Pages are independently serializable, retriable, cacheable, and resumable.
-- The checkpoint fingerprint includes both source hashes, complete translation
-  config, every resolved provider setting capable of changing output/schema
-  semantics, provider/model, actual prompt hash/version, and schema version.
+- The first-pass checkpoint fingerprint includes both source hashes, complete
+  translation config (including previous-page context count), every resolved
+  provider setting capable of changing output/schema semantics, provider/model,
+  actual main prompt/context hash and version, the table prompt contract hash and
+  version, and schema version. The table-pass fingerprint additionally includes
+  its exact prompt, first-pass fingerprint, and ordered table targets.
   Timeouts, retry counts, and request-size guards are persisted operational
   provenance but do not invalidate successful translations. Never key a cache by
   page number alone.
-- Assembly sorts and requires all physical pages. Never silently skip a failed
-  page or mark a partial document complete.
+- Assembly sorts and requires all physical pages. A current-schema table tag must
+  be reconstructed before assembly; only explicitly migrated legacy tables may
+  remain translated or manual. Never silently skip a failed page or mark a
+  partial document complete.
 - Preserve Unicode and source wording. Do not apply irreversible normalization.
 - Do not invent confidence/probability values. Model uncertainty is qualitative:
   exact term, proposed rendering, reason, and alternatives.
+- Classify footnotes by document function, not size or position. Preserve an
+  optional marker and cross-page continuation state; a footnote may fill an
+  entire page. Keep page numbers, running matter, watermarks, and printer
+  gathering signatures distinct from footnotes.
 - Machine output and immutable translation runs already exist. Corrections are
   append-only revisions scoped to
   `(document_id, translation_run_id, block_id)`; never attach a revision to a
@@ -171,11 +203,13 @@ provider responses, or test snapshots.
 
 TOML owns all web defaults and limits, including loopback host/port, upload/page
 limits, bounded concurrency, status polling, default languages/style/model, and
-the selectable-model allowlist and review context-page count. The UI may submit
-explicit per-job input/output languages, model, style, and term mappings. Resolve
-those through strict request models and a per-job config copy, then persist the
-resolved non-secret run provenance. Do not turn them into hidden browser, Python,
-or environment defaults.
+the selectable-model allowlist. It also owns
+`translation.previous_page_context_count`, which defaults to 2 and is constrained
+to 0–10; zero disables prior-page context. The UI may submit explicit per-job
+input/output languages, model, style, and term mappings. Resolve those through
+strict request models and a per-job config copy, then persist the resolved
+non-secret run provenance. Do not turn them into hidden browser, Python, or
+environment defaults.
 
 The Settings label is **Save on this computer**. When checked, the narrow secret
 adapter writes `GEMINI_API_KEY` to the ignored local `.env`; when unchecked,
@@ -213,6 +247,10 @@ library when adequate.
 
 ### Persisted schema or block taxonomy
 
+- The current core schema is 4.0. Supported schema 2.0 and 3.0 reads migrate only
+  in memory: schema 2.0 translated tables remain legacy translated tables and
+  schema 3.0 manual table placeholders remain legacy manual tables. Do not
+  rewrite or silently schedule either form for schema 4.0 reconstruction.
 - Update Pydantic models in `domain/`.
 - Keep `extra="forbid"` and semantic validators.
 - Bump `SCHEMA_VERSION` for an incompatible persisted change.
@@ -223,16 +261,22 @@ library when adequate.
 ### Prompt behavior
 
 - Edit the resource under `prompts/`, not an inline provider string.
-- Bump `PROMPT_VERSION` for a semantic change after the initial version ships.
+- Bump `PROMPT_VERSION` for a semantic main-pass change and
+  `TABLE_PROMPT_VERSION` for a semantic table-pass change. The current contracts
+  are `translate-page-v4` and `reconstruct-tables-v1`.
 - Keep page Markdown visibly delimited as document data.
-- Confirm the fingerprint changes and add/update prompt tests.
-- Never include secrets or unrelated document pages.
+- Delimit any previous finalized page projection as untrusted, read-only context
+  and require current-page-only output.
+- Confirm both relevant fingerprints change and add/update prompt tests.
+- Never include secrets, prior page images/revisions/provider metadata, or
+  unrelated document pages.
 
 ### Provider integration
 
 - Implement or change the `PageTranslator` adapter only.
 - Keep provider SDK request/response types inside that adapter.
-- Return the provider-neutral `ProviderResult`.
+- Return provider-neutral `ProviderResult` and `TableReconstructionResult`
+  values from the two protocol methods.
 - Use structured output and revalidate it locally.
 - Bound timeout/retry behavior from TOML; do not retry permanent errors forever.
 - Mock the SDK in normal tests. A live call requires explicit user intent.
@@ -248,6 +292,13 @@ library when adequate.
 ### Checkpoint/persistence
 
 - Write canonical page JSON atomically in the same directory before replacement.
+- Persist the validated first pass to that page's `translation.json` before a
+  required table pass. While it still contains current-schema table tags it is an
+  intermediate checkpoint, not an assemblable final page. If table reconstruction
+  fails, record the `table_reconstruction` stage and resume from that checkpoint
+  without repeating pass one.
+- Replace the intermediate page atomically with the completed page and persist
+  distinct main/table prompt, response, token, and fingerprint provenance.
 - Do not checkpoint base64 image data, keys, or raw provider responses.
 - Make failures visible and preserve earlier successful pages.
 - Add tests for resume and every new cache-invalidation input.
@@ -274,12 +325,19 @@ library when adequate.
 - Keep only the translated review pane user-scrollable. Use
   `original_page_number` to drive the corresponding original page and preserve
   keyboard/focus/accessibility behavior when rerendering edited blocks.
-- Mount only the active review page and the configured number of pages on either
-  side. Shift that window at its boundaries without losing unsaved drafts, the
-  active page's viewport position, or focused editor state.
+- Mount the complete translated document. Fetch and display only the active
+  physical page image as the translated pane crosses page boundaries; do not
+  eagerly load every source image.
+- Review opens as a filesystem-backed catalog of validated completed runs. Use
+  the immutable translation-run ID as the stable review identifier after a
+  restart, and store the latest physical review page in the run-scoped review
+  position sidecar. Do not imply that in-progress jobs or executor state survive.
 - Delegate generated mapping-row and review-block input/click/keyboard/paste
   events from their stable containers. Do not attach listeners per rendered
   block, uncertainty, editor, or mapping row.
+- Present `table_reconstruction` as machine-reconstructed table content, not as
+  exact source transcription or reviewer-authored text. Preserve the append-only
+  revision path for corrections.
 - Render uncertainty text from structured offsets or the structured whole-block
   fallback. Offer one-occurrence replacement always for a range highlight and
   all-occurrence replacement only when the API says more than one unresolved
@@ -287,9 +345,10 @@ library when adequate.
 - Keep exporter policy explicit. The current reviewed download uses the latest
   effective revision, regardless of review status; do not silently change it to
   accepted-only behavior.
-- Treat the server as loopback-only and process-local. Do not imply that the
-  bounded thread executor is a durable queue or that browser job IDs survive a
-  restart.
+- Treat the server as loopback-only. The bounded executor, upload aliases, and
+  in-progress state are process-local; completed canonical runs are rediscovered
+  from disk by stable translation-run ID. Do not call that discovery a durable
+  queue.
 - Add concurrency/history tests before multi-editor behavior.
 
 For a web change, inspect `interfaces/web/app.py`, its strict schemas and static
@@ -317,13 +376,17 @@ uv lock --check
 Use focused tests while iterating. Required coverage by change:
 
 - models: strict validation, semantic validation, JSON round-trip;
-- prompt: resolved config and prompt-version behavior;
-- compiler: deterministic golden output for affected block types;
+- prompt: resolved config, bounded previous-page projection, and main/table
+  prompt-version behavior;
+- compiler: deterministic golden output for affected block types, including
+  reconstructed GFM tables and remaining manual figures;
 - extraction: physical page/image/Markdown pairing;
-- provider: mocked multimodal payload and structured response mapping;
-- pipeline: fake-provider end-to-end path, failure/resume, cache invalidation;
+- provider: mocked primary and table multimodal payload/schema mapping;
+- pipeline: fake-provider end-to-end path, context selection, table batching,
+  stage-specific failure/resume, and cache invalidation;
 - config: valid defaults, unknown-key failure, and changed behavior;
-- filesystem: atomic persistence and safe relative artifact resolution;
+- filesystem: atomic persistence, schema 2.0/3.0 compatibility, and safe relative
+  artifact resolution;
 - editorial: revision scope/history, stale-base conflicts, effective views,
   uncertainty offset safety, one/all semantics, and reviewed export;
 - web: CSRF, upload limits/type/path confinement, per-job config resolution,
@@ -358,7 +421,9 @@ runs.
 - Do not log or print keys, base64 images, full page text, or full provider
   responses.
 - The interface must continue to disclose that the configured provider receives
-  page images and extracted text.
+  current-page images, complete extracted page text, and the configured
+  read-only projection of prior finalized machine translations. A table-bearing
+  page sends the current image/text twice.
 - The source PDF is copied to a short-lived immutable extraction snapshot, hashed
   there, and never copied into the durable job artifact directory.
 - Browser uploads are staged under the configured artifact root, use opaque

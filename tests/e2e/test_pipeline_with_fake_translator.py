@@ -2,9 +2,16 @@ from pathlib import Path
 
 import pytest
 
+import article_translator.application.pipeline as pipeline_module
 from article_translator.adapters.storage import FilesystemArtifactRepository
 from article_translator.application.pipeline import TranslationPipeline
-from article_translator.domain.enums import BlockType, ExtractionStatus
+from article_translator.domain.enums import (
+    BlockType,
+    ExtractionStatus,
+    ManualInsertionReason,
+    SegmentContinuation,
+    SegmentHandling,
+)
 from article_translator.domain.errors import (
     IncompleteDocumentError,
     PageTranslationError,
@@ -13,7 +20,11 @@ from article_translator.domain.errors import (
 from article_translator.domain.models import (
     ArtifactRef,
     GeneratedBlock,
+    GeneratedFootnoteBlock,
+    GeneratedManualInsertionBlock,
     GeneratedPagePayload,
+    GeneratedTableMarkdown,
+    GeneratedTablePayload,
     MarkdownExportSettings,
     PreparedPage,
     TranslationSettings,
@@ -23,6 +34,8 @@ from article_translator.ports.translation import (
     PageTranslationRequest,
     ProviderDescriptor,
     ProviderResult,
+    TableReconstructionRequest,
+    TableReconstructionResult,
 )
 
 
@@ -67,6 +80,7 @@ class FakeTranslator:
         self.fail_once_on = fail_once_on
         self.configuration = configuration or {}
         self.semantic_configuration = semantic_configuration or {}
+        self.prompts: dict[int, str] = {}
 
     @property
     def descriptor(self) -> ProviderDescriptor:
@@ -79,6 +93,7 @@ class FakeTranslator:
 
     def translate_page(self, request: PageTranslationRequest) -> ProviderResult:
         self.calls.append(request.original_page_number)
+        self.prompts[request.original_page_number] = request.prompt
         if self.fail_once_on == request.original_page_number:
             self.fail_once_on = None
             raise TimeoutError("temporary provider timeout")
@@ -94,6 +109,14 @@ class FakeTranslator:
                 ]
             ),
             response_id=f"fake-{request.original_page_number}",
+        )
+
+    def reconstruct_tables(
+        self,
+        request: TableReconstructionRequest,
+    ) -> TableReconstructionResult:
+        raise AssertionError(
+            f"Unexpected table reconstruction on page {request.original_page_number}"
         )
 
 
@@ -125,6 +148,111 @@ class InvalidOutputTranslator:
             }
         )
         raise AssertionError("invalid payload should have raised")
+
+    def reconstruct_tables(
+        self,
+        request: TableReconstructionRequest,
+    ) -> TableReconstructionResult:
+        raise AssertionError(
+            f"Unexpected table reconstruction on page {request.original_page_number}"
+        )
+
+
+class SegmentingTranslator:
+    def __init__(self, *, fail_table_once: bool = False) -> None:
+        self.page_calls: list[int] = []
+        self.table_requests: list[TableReconstructionRequest] = []
+        self.fail_table_once = fail_table_once
+
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        return ProviderDescriptor(provider="fake", model="segments-v1")
+
+    def translate_page(self, request: PageTranslationRequest) -> ProviderResult:
+        self.page_calls.append(request.original_page_number)
+        if request.original_page_number == 1:
+            return ProviderResult(
+                payload=GeneratedPagePayload(
+                    blocks=[
+                        GeneratedBlock(
+                            order=1,
+                            type=BlockType.BODY,
+                            source_text="Indledning",
+                            translated_text="Introduction",
+                        ),
+                        GeneratedManualInsertionBlock(
+                            order=2,
+                            type=BlockType.TABLE,
+                            manual_insertion_reason=ManualInsertionReason.TABLE_LIKE,
+                            continuation=SegmentContinuation.TO_NEXT_PAGE,
+                            classification_review_required=True,
+                        ),
+                        GeneratedManualInsertionBlock(
+                            order=3,
+                            type=BlockType.TABLE,
+                            manual_insertion_reason=ManualInsertionReason.TABLE,
+                            continuation=SegmentContinuation.COMPLETE,
+                        ),
+                    ]
+                )
+            )
+        return ProviderResult(
+            payload=GeneratedPagePayload(
+                blocks=[
+                    GeneratedFootnoteBlock(
+                        order=1,
+                        type=BlockType.FOOTNOTE,
+                        source_text="Fortsat note",
+                        translated_text="Continued note",
+                        footnote_marker=None,
+                        continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
+                    )
+                ]
+            )
+        )
+
+    def reconstruct_tables(
+        self,
+        request: TableReconstructionRequest,
+    ) -> TableReconstructionResult:
+        self.table_requests.append(request)
+        if self.fail_table_once:
+            self.fail_table_once = False
+            raise TimeoutError("temporary table reconstruction timeout")
+        return TableReconstructionResult(
+            payload=GeneratedTablePayload(
+                tables=[
+                    GeneratedTableMarkdown(
+                        order=order,
+                        translated_markdown=(
+                            "| Date | Deaths |\n| --- | ---: |\n| 3 July | 3 |\n| 4 July | 3 |"
+                        ),
+                    )
+                    for order in request.expected_block_orders
+                ]
+            ),
+            response_id="fake-table-1",
+            input_tokens=30,
+            output_tokens=20,
+        )
+
+
+class MissingTableResultTranslator(SegmentingTranslator):
+    def reconstruct_tables(
+        self,
+        request: TableReconstructionRequest,
+    ) -> TableReconstructionResult:
+        self.table_requests.append(request)
+        return TableReconstructionResult(
+            payload=GeneratedTablePayload(
+                tables=[
+                    GeneratedTableMarkdown(
+                        order=request.expected_block_orders[0],
+                        translated_markdown="| Date | Deaths |\n| --- | ---: |\n| 3 July | 3 |",
+                    )
+                ]
+            )
+        )
 
 
 def _ref(root: Path, path: Path, media_type: str) -> ArtifactRef:
@@ -205,6 +333,96 @@ def test_full_pipeline_is_resumable_and_config_invalidates_cache(tmp_path: Path)
     assert translator.calls == [1, 2, 1, 2]
 
 
+def test_pipeline_supplies_finalized_previous_translation_as_page_context(
+    tmp_path: Path,
+) -> None:
+    pipeline, job_dir = _prepared_job(tmp_path)
+    translator = FakeTranslator()
+
+    pipeline.translate_document(
+        job_dir,
+        settings=TranslationSettings(previous_page_context_count=1),
+        translator=translator,
+    )
+
+    first_context = (
+        translator.prompts[1]
+        .split("PREVIOUS_TRANSLATED_PAGES_START\n", 1)[1]
+        .split("\nPREVIOUS_TRANSLATED_PAGES_END", 1)[0]
+    )
+    second_context = (
+        translator.prompts[2]
+        .split("PREVIOUS_TRANSLATED_PAGES_START\n", 1)[1]
+        .split("\nPREVIOUS_TRANSLATED_PAGES_END", 1)[0]
+    )
+    assert first_context == "[]"
+    assert '"original_page_number": 1' in second_context
+    assert "Source page 1" in second_context
+    assert "Translated page 1" in second_context
+    assert "response_id" not in second_context
+
+
+def test_pipeline_maps_provider_variants_to_trusted_compatible_blocks(tmp_path: Path) -> None:
+    pipeline, job_dir = _prepared_job(tmp_path)
+    translator = SegmentingTranslator()
+
+    document = pipeline.translate_document(
+        job_dir,
+        settings=TranslationSettings(),
+        translator=translator,
+    )
+
+    body, reconstructed, second_table = document.pages[0].blocks
+    footnote = document.pages[1].blocks[0]
+    assert translator.page_calls == [1, 2]
+    assert len(translator.table_requests) == 1
+    assert translator.table_requests[0].expected_block_orders == (2, 3)
+    assert body.translated_text == "Introduction"
+    assert reconstructed.segment_handling is SegmentHandling.TABLE_RECONSTRUCTION
+    assert reconstructed.source_text is None
+    assert reconstructed.translated_text is not None
+    assert "| Date | Deaths |" in reconstructed.translated_text
+    assert reconstructed.continuation is SegmentContinuation.TO_NEXT_PAGE
+    assert reconstructed.classification_review_required is True
+    assert second_table.segment_handling is SegmentHandling.TABLE_RECONSTRUCTION
+    assert document.pages[0].table_reconstruction is not None
+    assert document.pages[0].table_reconstruction.block_ids == [
+        reconstructed.block_id,
+        second_table.block_id,
+    ]
+    assert footnote.segment_handling is SegmentHandling.TRANSLATE
+    assert footnote.footnote_marker is None
+    assert footnote.continuation is SegmentContinuation.FROM_PREVIOUS_PAGE
+
+
+def test_completed_table_checkpoint_revalidates_second_pass_fingerprint(tmp_path: Path) -> None:
+    pipeline, job_dir = _prepared_job(tmp_path)
+    document = pipeline.translate_document(
+        job_dir,
+        settings=TranslationSettings(),
+        translator=SegmentingTranslator(),
+    )
+    repository = FilesystemArtifactRepository(job_dir)
+    page = repository.read_page_translation(document.translation_run_id, 1)
+    assert page.table_reconstruction is not None
+    damaged_metadata = page.table_reconstruction.model_copy(update={"input_fingerprint": "b" * 64})
+    repository.write_page_translation(
+        document.translation_run_id,
+        page.model_copy(update={"table_reconstruction": damaged_metadata}),
+    )
+    resumed = SegmentingTranslator()
+
+    with pytest.raises(StaleCheckpointError, match="table checkpoint"):
+        pipeline.translate_document(
+            job_dir,
+            settings=TranslationSettings(),
+            translator=resumed,
+        )
+
+    assert resumed.page_calls == []
+    assert resumed.table_requests == []
+
+
 def test_resume_after_failure_does_not_repeat_completed_page(tmp_path: Path) -> None:
     pipeline, job_dir = _prepared_job(tmp_path)
     settings = TranslationSettings()
@@ -229,6 +447,93 @@ def test_resume_after_failure_does_not_repeat_completed_page(tmp_path: Path) -> 
     assert document.translation_run_id == failed_run_id
     assert FilesystemArtifactRepository(job_dir).read_manifest().translation_run_id == failed_run_id
     assert not (job_dir / "runs" / failed_run_id / "pages" / "0002" / "failure.json").exists()
+
+
+def test_table_failure_resumes_from_first_pass_checkpoint(tmp_path: Path) -> None:
+    pipeline, job_dir = _prepared_job(tmp_path)
+    translator = SegmentingTranslator(fail_table_once=True)
+
+    with pytest.raises(PageTranslationError, match="temporary table reconstruction timeout"):
+        pipeline.translate_document(
+            job_dir,
+            settings=TranslationSettings(previous_page_context_count=1),
+            translator=translator,
+        )
+
+    repository = FilesystemArtifactRepository(job_dir)
+    run_id = repository.read_manifest().translation_run_id
+    assert run_id is not None
+    intermediate = repository.read_page_translation(run_id, 1)
+    assert translator.page_calls == [1]
+    assert len(translator.table_requests) == 1
+    assert intermediate.table_reconstruction is None
+    assert [block.segment_handling for block in intermediate.blocks[1:]] == [
+        SegmentHandling.MANUAL_INSERTION,
+        SegmentHandling.MANUAL_INSERTION,
+    ]
+    failure = repository.read_page_failure(run_id, 1)
+    assert failure.stage == "table_reconstruction"
+    assert failure.input_fingerprint is not None
+
+    document = pipeline.translate_document(
+        job_dir,
+        settings=TranslationSettings(previous_page_context_count=1),
+        translator=translator,
+    )
+
+    assert translator.page_calls == [1, 2]
+    assert len(translator.table_requests) == 2
+    assert all(
+        block.segment_handling is SegmentHandling.TABLE_RECONSTRUCTION
+        for block in document.pages[0].blocks[1:]
+    )
+    assert not repository.has_page_failure(run_id, 1)
+
+
+def test_table_batch_is_atomic_when_provider_omits_a_target(tmp_path: Path) -> None:
+    pipeline, job_dir = _prepared_job(tmp_path)
+    translator = MissingTableResultTranslator()
+
+    with pytest.raises(PageTranslationError, match=r"expected \[2, 3\], received \[2\]"):
+        pipeline.translate_document(
+            job_dir,
+            settings=TranslationSettings(),
+            translator=translator,
+        )
+
+    repository = FilesystemArtifactRepository(job_dir)
+    run_id = repository.read_manifest().translation_run_id
+    assert run_id is not None
+    intermediate = repository.read_page_translation(run_id, 1)
+    assert intermediate.table_reconstruction is None
+    assert [block.segment_handling for block in intermediate.blocks[1:]] == [
+        SegmentHandling.MANUAL_INSERTION,
+        SegmentHandling.MANUAL_INSERTION,
+    ]
+
+
+def test_table_prompt_assembly_failure_is_recorded_as_table_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline, job_dir = _prepared_job(tmp_path)
+
+    def fail_table_prompt(**_: object) -> str:
+        raise ValueError("synthetic table prompt failure")
+
+    monkeypatch.setattr(pipeline_module, "build_table_prompt", fail_table_prompt)
+    with pytest.raises(PageTranslationError, match="synthetic table prompt failure"):
+        pipeline.translate_document(
+            job_dir,
+            settings=TranslationSettings(),
+            translator=SegmentingTranslator(),
+        )
+
+    repository = FilesystemArtifactRepository(job_dir)
+    run_id = repository.read_manifest().translation_run_id
+    assert run_id is not None
+    failure = repository.read_page_failure(run_id, 1)
+    assert failure.stage == "table_reconstruction"
 
 
 def test_forced_translations_create_coexisting_immutable_runs(tmp_path: Path) -> None:

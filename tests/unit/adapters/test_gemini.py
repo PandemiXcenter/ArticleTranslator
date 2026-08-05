@@ -10,9 +10,14 @@ from article_translator.domain.enums import BlockType
 from article_translator.domain.models import (
     GeneratedBlock,
     GeneratedPagePayload,
+    GeneratedTableMarkdown,
+    GeneratedTablePayload,
     TranslationSettings,
 )
-from article_translator.ports.translation import PageTranslationRequest
+from article_translator.ports.translation import (
+    PageTranslationRequest,
+    TableReconstructionRequest,
+)
 
 
 class FakeModels:
@@ -102,6 +107,113 @@ def test_gemini_adapter_maps_multimodal_structured_output(tmp_path: Path) -> Non
     assert client.closed is True
 
 
+def test_gemini_adapter_maps_table_reconstruction_multimodal_output(tmp_path: Path) -> None:
+    image = tmp_path / "page.png"
+    image_bytes = b"table-page-image"
+    image.write_bytes(image_bytes)
+    payload = GeneratedTablePayload(
+        tables=[
+            GeneratedTableMarkdown(
+                order=3,
+                translated_markdown="| Date | Deaths |\n| --- | ---: |\n| 3 July | 3 |",
+            )
+        ]
+    )
+    response = SimpleNamespace(
+        parsed=payload.model_dump(mode="json"),
+        text=None,
+        response_id="table-response-123",
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=77,
+            candidates_token_count=18,
+        ),
+    )
+    client = FakeClient(response)
+    translator = GeminiPageTranslator(
+        api_key="unused",
+        model="gemini-test",
+        api_version="v1",
+        timeout_seconds=120,
+        attempts=3,
+        max_inline_request_bytes=19_000_000,
+        client=client,
+    )
+
+    result = translator.reconstruct_tables(
+        TableReconstructionRequest(
+            original_page_number=4,
+            markdown="3 dead, on 3rd of July; 3, 4th",
+            image_path=image,
+            image_media_type="image/png",
+            prompt="Reconstruct block 3 as a table",
+            settings=TranslationSettings(),
+            expected_block_orders=(3,),
+        )
+    )
+
+    assert result.payload == payload
+    assert result.response_id == "table-response-123"
+    assert result.input_tokens == 77
+    assert result.output_tokens == 18
+    assert client.models.kwargs["model"] == "gemini-test"
+    content = client.models.kwargs["contents"]
+    assert isinstance(content, types.Content)
+    assert content.parts is not None
+    assert content.parts[0].inline_data is not None
+    assert content.parts[0].inline_data.data == image_bytes
+    assert content.parts[0].inline_data.mime_type == "image/png"
+    assert content.parts[1].text == "Reconstruct block 3 as a table"
+    generation_config = client.models.kwargs["config"]
+    assert generation_config.response_mime_type == "application/json"
+    assert generation_config.response_schema is None
+    assert generation_config.response_json_schema == GeneratedTablePayload.model_json_schema()
+
+
+def test_gemini_adapter_validates_table_reconstruction_response_text(tmp_path: Path) -> None:
+    image = tmp_path / "page.png"
+    image.write_bytes(b"table-page-image")
+    payload = GeneratedTablePayload(
+        tables=[
+            GeneratedTableMarkdown(
+                order=1,
+                translated_markdown="| Date | Deaths |\n| --- | --- |\n| 4 July | 3 |",
+            )
+        ]
+    )
+    translator = GeminiPageTranslator(
+        api_key="unused",
+        model="gemini-test",
+        api_version="v1",
+        timeout_seconds=120,
+        attempts=3,
+        max_inline_request_bytes=19_000_000,
+        client=FakeClient(
+            SimpleNamespace(
+                parsed=None,
+                text=payload.model_dump_json(),
+                response_id=None,
+                usage_metadata=None,
+            )
+        ),
+    )
+
+    result = translator.reconstruct_tables(
+        TableReconstructionRequest(
+            original_page_number=1,
+            markdown="source OCR",
+            image_path=image,
+            image_media_type="image/png",
+            prompt="reconstruct",
+            settings=TranslationSettings(),
+            expected_block_orders=(1,),
+        )
+    )
+
+    assert result.payload == payload
+    assert result.input_tokens is None
+    assert result.output_tokens is None
+
+
 def test_gemini_adapter_rejects_oversized_inline_request_before_call(
     tmp_path: Path,
 ) -> None:
@@ -127,6 +239,36 @@ def test_gemini_adapter_rejects_oversized_inline_request_before_call(
                 image_media_type="image/png",
                 prompt="translate",
                 settings=TranslationSettings(),
+            )
+        )
+
+    assert client.models.kwargs == {}
+
+
+def test_gemini_adapter_rejects_oversized_table_request_before_call(tmp_path: Path) -> None:
+    image = tmp_path / "large.png"
+    image.write_bytes(b"x" * 100)
+    client = FakeClient(response=None)
+    translator = GeminiPageTranslator(
+        api_key="unused",
+        model="gemini-test",
+        api_version="v1",
+        timeout_seconds=120,
+        attempts=3,
+        max_inline_request_bytes=100,
+        client=client,
+    )
+
+    with pytest.raises(ValueError, match=r"lower extraction\.image_dpi"):
+        translator.reconstruct_tables(
+            TableReconstructionRequest(
+                original_page_number=1,
+                markdown="source",
+                image_path=image,
+                image_media_type="image/png",
+                prompt="reconstruct",
+                settings=TranslationSettings(),
+                expected_block_orders=(1,),
             )
         )
 

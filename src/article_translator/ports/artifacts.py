@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Protocol
 
-from article_translator.domain.editorial import BlockRevision
+from article_translator.domain.editorial import BlockRevision, ReviewPosition
 from article_translator.domain.models import (
     ArtifactRef,
     DocumentTranslation,
@@ -71,3 +71,11 @@ class ArtifactRepository(Protocol):
     ) -> list[BlockRevision]: ...
 
     def append_block_revision(self, revision: BlockRevision) -> None: ...
+
+    def read_review_position(
+        self,
+        document_id: str,
+        translation_run_id: str,
+    ) -> ReviewPosition | None: ...
+
+    def write_review_position(self, position: ReviewPosition) -> None: ...

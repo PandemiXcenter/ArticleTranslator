@@ -42,6 +42,10 @@ class BlockRevisionRequest(ApiModel):
     status: ReviewStatus
 
 
+class ReviewPositionRequest(ApiModel):
+    original_page_number: int = Field(ge=1)
+
+
 class UncertaintyReplacementRequest(ApiModel):
     replacement: NonEmptyText
     scope: Literal["one", "all"]
