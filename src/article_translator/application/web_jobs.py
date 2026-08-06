@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from pydantic import SecretStr
 
+from article_translator.application.editorial import EditorialService
 from article_translator.application.pipeline import TranslationPipeline
 from article_translator.application.prompting import PROMPT_VERSION, TABLE_PROMPT_VERSION
 from article_translator.config import ProjectConfig
@@ -66,13 +67,16 @@ class WebJobSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class WebReviewSnapshot:
-    """One completed immutable run available for review after process restart."""
+    """One completed translation run available in the Articles catalog."""
 
     job_id: str
     status: WebJobStatus
     filename: str
     page_count: int
     continue_page: int
+    accepted_blocks: int
+    total_blocks: int
+    review_complete: bool
     translation_run_id: str
     updated_at: datetime
 
@@ -109,6 +113,7 @@ class _WebJobRecord:
 @dataclass(frozen=True, slots=True)
 class _CompletedReviewRecord:
     job_dir: Path
+    document: DocumentTranslation
     translation_run_id: str
     document_id: str
     filename: str
@@ -373,6 +378,7 @@ class WebJobManager:
         completed_at = max(page.translated_at for page in document.pages)
         completed = _CompletedReviewRecord(
             job_dir=resolved_job_dir,
+            document=document,
             translation_run_id=translation_run_id,
             document_id=document.document_id,
             filename=document.source_file_name,
@@ -391,9 +397,20 @@ class WebJobManager:
 
     def _review_snapshot(self, record: _CompletedReviewRecord) -> WebReviewSnapshot:
         continue_page = 1
+        accepted_blocks = 0
+        total_blocks = 0
+        review_complete = False
         updated_at = record.completed_at
         try:
             repository = self._repository_factory(record.job_dir)
+            review = EditorialService(repository).review_document(
+                record.document,
+                record.translation_run_id,
+            )
+            blocks = [block for page in review.pages for block in page.blocks]
+            total_blocks = len(blocks)
+            accepted_blocks = sum(block.review_status.value == "accepted" for block in blocks)
+            review_complete = accepted_blocks == total_blocks
             position = repository.read_review_position(
                 record.document_id,
                 record.translation_run_id,
@@ -409,6 +426,9 @@ class WebJobManager:
             filename=record.filename,
             page_count=record.page_count,
             continue_page=continue_page,
+            accepted_blocks=accepted_blocks,
+            total_blocks=total_blocks,
+            review_complete=review_complete,
             translation_run_id=record.translation_run_id,
             updated_at=updated_at,
         )

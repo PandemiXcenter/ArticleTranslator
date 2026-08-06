@@ -99,6 +99,13 @@ class ConfiguredMarkdownExportSettings(MarkdownExportSettings):
     include_page_numbers: bool
 
 
+class PdfExportConfig(ConfigModel):
+    """Local XeLaTeX compilation settings for reviewed PDF downloads."""
+
+    latex_engine: Literal["xelatex"]
+    compile_timeout_seconds: int = Field(ge=1, le=300)
+
+
 class ProjectConfig(ConfigModel):
     """Fully resolved, non-secret application configuration."""
 
@@ -108,6 +115,7 @@ class ProjectConfig(ConfigModel):
     provider: ProviderConfig
     translation: ConfiguredTranslationSettings
     export: ConfiguredMarkdownExportSettings
+    pdf_export: PdfExportConfig
     web: WebConfig
 
 

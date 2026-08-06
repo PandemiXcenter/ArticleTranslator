@@ -11,11 +11,11 @@ FastAPI workbench for colleagues. The active architecture is:
 PDF -> paired per-page Markdown + PNG -> structured page translation pass
     -> conditional batched table reconstruction pass for that page
     -> canonical validated document JSON -> immutable translation run
-    -> append-only editorial revisions -> reviewed Markdown projection
+    -> append-only editorial revisions -> reviewed Markdown/text/LaTeX PDF projections
 ```
 
 The web interface is deliberately a small loopback-only internal tool. Preserve
-its Translate, Term mappings, Settings, and Review tabs, but do not add a
+its Translate, Term mappings, Settings, and Articles tabs, but do not add a
 database, remote deployment stack, authentication scheme, frontend framework, or
 durable task queue unless a task explicitly expands that phase.
 
@@ -63,6 +63,10 @@ src/article_translator/application/
 src/article_translator/adapters/extraction/
     pypdf page splitting, MarkItDown conversion, PDFium rendering.
 
+src/article_translator/adapters/export/
+    Narrow local XeLaTeX compilation. Generated content remains escaped and
+    shell escape remains disabled.
+
 src/article_translator/adapters/llm/
     Gemini SDK boundary. Google SDK types must not escape this package.
 
@@ -83,7 +87,8 @@ src/article_translator/composition.py
     Shared wiring for CLI and web entry points.
 
 src/article_translator/cli.py
-    Command inputs and `serve` entry point only. No pipeline/business rules.
+    Command inputs plus `serve` and the zero-argument `uv run app` entry points.
+    No pipeline/business rules.
 
 tests/unit/
     Pure domain/application/config and mocked-adapter behavior.
@@ -328,15 +333,15 @@ library when adequate.
   pricing language, onboarding theater, or decorative AI-generated imagery.
 - Translate owns PDF selection and per-job language direction. Term mappings owns
   authoritative glossary rows. Settings owns model/style and API-key handling.
-  Review owns the page-synchronized original/effective translation view,
-  validation, uncertainty correction, and reviewed Markdown download.
+  Articles owns the catalog, page-synchronized original/effective translation
+  view, validation, uncertainty correction, reading, and reviewed exports.
 - Keep only the translated review pane user-scrollable. Use
   `original_page_number` to drive the corresponding original page and preserve
   keyboard/focus/accessibility behavior when rerendering edited blocks.
 - Mount the complete translated document. Fetch and display only the active
   physical page image as the translated pane crosses page boundaries; do not
   eagerly load every source image.
-- Review opens as a filesystem-backed catalog of validated completed runs. Use
+- Articles opens as a filesystem-backed catalog of validated completed runs. Use
   the immutable translation-run ID as the stable review identifier after a
   restart, and store the latest physical review page in the run-scoped review
   position sidecar. Do not imply that in-progress jobs or executor state survive.
@@ -350,11 +355,12 @@ library when adequate.
 - Render uncertainty text from structured offsets or the structured whole-block
   fallback. Offer one-occurrence replacement always for a range highlight and
   all-occurrence replacement only when the API says more than one unresolved
-  annotated match exists. The Review uncertainty list groups unresolved items by
+  annotated match exists. The Articles uncertainty list groups unresolved items by
   structured term identity and orders groups by descending occurrence count.
-- Keep exporter policy explicit. The current reviewed download uses the latest
-  effective revision, regardless of review status; do not silently change it to
-  accepted-only behavior.
+- Keep exporter policy explicit. Markdown, plain text, and PDF use the latest
+  effective revision, regardless of review status; do not silently change them
+  to accepted-only behavior. Project each format from canonical data and the
+  effective review view; never parse `document.md` to recover structure.
 - Treat the server as loopback-only. The bounded executor, upload aliases, and
   in-progress state are process-local; completed canonical runs are rediscovered
   from disk by stable translation-run ID. Do not call that discovery a durable
@@ -398,10 +404,10 @@ Use focused tests while iterating. Required coverage by change:
 - filesystem: atomic persistence, schema 2.0/3.0 compatibility, and safe relative
   artifact resolution;
 - editorial: revision scope/history, stale-base conflicts, effective views,
-  uncertainty offset safety, one/all semantics, and reviewed export;
+  uncertainty offset safety, one/all semantics, and reviewed multi-format export;
 - web: CSRF, upload limits/type/path confinement, per-job config resolution,
   model allowlisting, API-key redaction/save/clear behavior, job lifecycle,
-  review commands, and reviewed download.
+  review commands, Articles progress/actions, and reviewed downloads.
 
 Useful focused gate for interface/editorial work:
 

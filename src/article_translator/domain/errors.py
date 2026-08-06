@@ -50,3 +50,7 @@ class RevisionConflictError(EditorialError):
 
 class ReplaceAllUnavailableError(EditorialError):
     """Translate All was requested for a term with fewer than two highlights."""
+
+
+class PdfExportError(ArticleTranslatorError):
+    """A reviewed LaTeX document could not be compiled into a PDF."""

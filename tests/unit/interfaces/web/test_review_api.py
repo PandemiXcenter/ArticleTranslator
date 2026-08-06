@@ -19,6 +19,7 @@ from article_translator.domain.enums import (
     SegmentContinuation,
     SegmentHandling,
 )
+from article_translator.domain.errors import PdfExportError
 from article_translator.domain.models import (
     ArtifactRef,
     DocumentTranslation,
@@ -46,6 +47,20 @@ class ReadyJobManager:
 
     def shutdown(self) -> None:
         return None
+
+
+class RecordingPdfCompiler:
+    def __init__(self) -> None:
+        self.sources: list[str] = []
+
+    def compile(self, latex_source: str) -> bytes:
+        self.sources.append(latex_source)
+        return b"%PDF-1.7\nreviewed"
+
+
+class FailingPdfCompiler:
+    def compile(self, latex_source: str) -> bytes:
+        raise PdfExportError(f"private compiler detail: {len(latex_source)}")
 
 
 def _artifact(path: str, media_type: str) -> ArtifactRef:
@@ -118,10 +133,12 @@ def test_review_revision_replace_all_and_export_contract(tmp_path: Path) -> None
         update={"paths": config.paths.model_copy(update={"artifacts_dir": tmp_path / "artifacts"})}
     )
     manager = ReadyJobManager(job_dir)
+    pdf_compiler = RecordingPdfCompiler()
     app = create_app(
         config,
         job_manager=cast(WebJobManager, manager),
         secret_store=DotenvSecretStore(tmp_path / ".env"),
+        pdf_compiler=pdf_compiler,
     )
     job_path = f"/api/jobs/{'b' * 32}"
 
@@ -162,6 +179,8 @@ def test_review_revision_replace_all_and_export_contract(tmp_path: Path) -> None
             headers={"X-CSRF-Token": token},
         )
         exported = client.get(f"{job_path}/export.md")
+        exported_text = client.get(f"{job_path}/export.txt")
+        exported_pdf = client.get(f"{job_path}/export.pdf")
 
     assert initial.status_code == 200
     initial_block = initial.json()["pages"][0]["blocks"][0]
@@ -202,6 +221,38 @@ def test_review_revision_replace_all_and_export_contract(tmp_path: Path) -> None
     assert exported.status_code == 200
     assert "old and old" in exported.text
     assert "olde and olde" not in exported.text
+    assert exported_text.status_code == 200
+    assert exported_text.text == "old and old\n"
+    assert exported_text.headers["content-disposition"].endswith(
+        'filename="reviewed-translation.txt"'
+    )
+    assert exported_pdf.status_code == 200
+    assert exported_pdf.content == b"%PDF-1.7\nreviewed"
+    assert exported_pdf.headers["content-type"] == "application/pdf"
+    assert "old and old" in pdf_compiler.sources[0]
+    assert "olde and olde" not in pdf_compiler.sources[0]
+
+
+def test_pdf_export_failure_is_redacted(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    FilesystemArtifactRepository(job_dir).write_document(RUN_ID, _document())
+    config = load_project_config(Path("config/default.toml"))
+    config = config.model_copy(
+        update={"paths": config.paths.model_copy(update={"artifacts_dir": tmp_path / "artifacts"})}
+    )
+    app = create_app(
+        config,
+        job_manager=cast(WebJobManager, ReadyJobManager(job_dir)),
+        secret_store=DotenvSecretStore(tmp_path / ".env"),
+        pdf_compiler=FailingPdfCompiler(),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/jobs/{'b' * 32}/export.pdf")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "The reviewed PDF could not be generated on this computer"}
+    assert "private compiler detail" not in response.text
 
 
 def test_review_page_image_and_position_are_scoped_and_persisted(tmp_path: Path) -> None:

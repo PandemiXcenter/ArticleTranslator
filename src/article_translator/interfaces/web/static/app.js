@@ -59,7 +59,9 @@ const progressErrorActions = document.querySelector("#progress-error-actions");
 const backToSetupButton = document.querySelector("#back-to-setup");
 const reviewDocument = document.querySelector("#review-document");
 const reviewProgress = document.querySelector("#review-progress");
-const exportLink = document.querySelector("#export-link");
+const exportPdfLink = document.querySelector("#export-pdf-link");
+const exportMarkdownLink = document.querySelector("#export-markdown-link");
+const exportTextLink = document.querySelector("#export-text-link");
 const activePageLabel = document.querySelector("#active-page-label");
 const sourceScroll = document.querySelector("#source-scroll");
 const translationScroll = document.querySelector("#translation-scroll");
@@ -1492,7 +1494,11 @@ function renderReview(drafts = new Map(), options = {}) {
   reviewEditor.hidden = false;
   reviewDocument.textContent = filename;
   document.title = `${filename} · ArticleTranslator`;
-  exportLink.href = `/api/jobs/${encodeURIComponent(state.jobId)}/export.md`;
+  configureExportLinks(state.jobId, {
+    pdf: exportPdfLink,
+    md: exportMarkdownLink,
+    txt: exportTextLink,
+  });
   updateReviewSummary();
   const focusedPage = options.focusBlockId
     ? state.blockIndex.get(asText(options.focusBlockId))?.page.original_page_number
@@ -1792,6 +1798,38 @@ function formatReviewDate(value) {
       }).format(date);
 }
 
+function exportUrl(jobId, format) {
+  return `/api/jobs/${encodeURIComponent(jobId)}/export.${format}`;
+}
+
+function configureExportLinks(jobId, links) {
+  for (const [format, link] of Object.entries(links)) {
+    if (link) {
+      link.href = jobId ? exportUrl(jobId, format) : "#";
+    }
+  }
+}
+
+function makeExportMenu(jobId) {
+  const menu = createElement("details", "export-menu article-export-menu");
+  const summary = createElement("summary", "secondary-button compact-control", "Export");
+  const options = createElement("div", "export-menu-options");
+  options.setAttribute("aria-label", "Export article");
+  const formats = [
+    ["pdf", "LaTeX PDF (.pdf)"],
+    ["md", "Markdown (.md)"],
+    ["txt", "Plain text (.txt)"],
+  ];
+  for (const [format, label] of formats) {
+    const link = createElement("a", "", label);
+    link.href = exportUrl(jobId, format);
+    link.download = "";
+    options.append(link);
+  }
+  menu.append(summary, options);
+  return menu;
+}
+
 function renderTranslationLibrary(payload) {
   const reviews = Array.isArray(payload) ? payload : payload?.jobs || payload?.translations || [];
   reviewList.replaceChildren();
@@ -1806,6 +1844,9 @@ function renderTranslationLibrary(payload) {
       pageCount,
       Math.max(1, Number(review.continue_page) || 1),
     );
+    const acceptedBlocks = Math.max(0, Number(review.accepted_blocks) || 0);
+    const totalBlocks = Math.max(0, Number(review.total_blocks) || 0);
+    const reviewComplete = review.review_complete === true;
     const card = createElement("article", "review-list-card");
     card.setAttribute("role", "listitem");
     const summary = createElement("div");
@@ -1815,16 +1856,29 @@ function renderTranslationLibrary(payload) {
     if (updated) {
       details.push(`Updated ${updated}`);
     }
+    details.push(
+      reviewComplete
+        ? "Review complete"
+        : totalBlocks > 0
+          ? `${acceptedBlocks} of ${totalBlocks} blocks reviewed`
+          : "Review not started",
+    );
     summary.append(createElement("p", "", details.join(" · ")));
     const open = createElement(
       "button",
       "primary-button compact-control",
-      `Continue from page ${continuePage}`,
+      reviewComplete
+        ? "Read"
+        : continuePage > 1
+          ? `Continue review · page ${continuePage}`
+          : "Review",
     );
     open.type = "button";
     open.dataset.action = "open-review";
     open.dataset.jobId = jobId;
-    card.append(summary, open);
+    const actions = createElement("div", "review-list-actions");
+    actions.append(open, makeExportMenu(jobId));
+    card.append(summary, actions);
     reviewList.append(card);
   }
 }
@@ -2034,6 +2088,11 @@ function resetForNewTranslation() {
   state.lastPersistedPage = null;
   sourcePageImage.removeAttribute("src");
   fullSizePageLink.href = "#";
+  configureExportLinks(null, {
+    pdf: exportPdfLink,
+    md: exportMarkdownLink,
+    txt: exportTextLink,
+  });
   translationContent.replaceChildren();
   uncertaintyGroupList.replaceChildren();
   uncertaintyListButton.disabled = true;

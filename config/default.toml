@@ -48,6 +48,11 @@ include_headers = false
 include_footers = false
 include_page_numbers = false
 
+[pdf_export]
+# Reviewed PDF downloads are typeset locally; no document content leaves the computer.
+latex_engine = "xelatex"
+compile_timeout_seconds = 120
+
 [web]
 # The editor is intentionally local-only until authentication is added.
 host = "127.0.0.1"

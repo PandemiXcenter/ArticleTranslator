@@ -163,3 +163,49 @@ def test_provider_and_translation_settings_are_composed_from_config(
     }
     assert pipeline.translated_with is not None
     assert pipeline.translated_with[1] == config.translation
+
+
+def test_short_app_launcher_prefers_personal_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = load_project_config(Path("config/default.toml"))
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    personal = config_dir / "personal.local.toml"
+    personal.touch()
+    loaded: list[Path] = []
+    served: list[ProjectConfig] = []
+
+    def fake_load(path: Path) -> ProjectConfig:
+        loaded.append(path)
+        return config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "load_project_config", fake_load)
+    monkeypatch.setattr(cli, "_serve_app", served.append)
+
+    cli.launch_app()
+
+    assert loaded == [Path("config/personal.local.toml")]
+    assert served == [config]
+
+
+def test_short_app_launcher_falls_back_to_checked_in_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = load_project_config(Path("config/default.toml"))
+    loaded: list[Path] = []
+
+    def fake_load(path: Path) -> ProjectConfig:
+        loaded.append(path)
+        return config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "load_project_config", fake_load)
+    monkeypatch.setattr(cli, "_serve_app", lambda _: None)
+
+    cli.launch_app()
+
+    assert loaded == [Path("config/default.toml")]

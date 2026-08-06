@@ -284,6 +284,25 @@ def test_web_jobs_run_in_order_and_preserve_distinct_glossary_runs(
     }
     assert all(review.job_id == review.translation_run_id for review in live_reviews)
     assert all(review.status is WebJobStatus.READY for review in live_reviews)
+    assert all(review.accepted_blocks == 0 for review in live_reviews)
+    assert all(review.total_blocks == 1 for review in live_reviews)
+    assert not any(review.review_complete for review in live_reviews)
+
+    first_document = repository.read_document(first_run_id)
+    EditorialService(repository).revise_block(
+        first_document,
+        first_run_id,
+        first_document.pages[0].blocks[0].block_id,
+        "Reviewed source text",
+        expected_base_revision=0,
+        status=ReviewStatus.ACCEPTED,
+    )
+    reviewed_snapshot = next(
+        review for review in manager.list_reviews() if review.translation_run_id == first_run_id
+    )
+    assert reviewed_snapshot.accepted_blocks == 1
+    assert reviewed_snapshot.total_blocks == 1
+    assert reviewed_snapshot.review_complete is True
 
     malformed = config.paths.artifacts_dir / "malformed"
     malformed.mkdir()
@@ -481,6 +500,9 @@ def test_completed_multi_page_review_reopens_after_manager_restart(
             "filename": "article.pdf",
             "page_count": 2,
             "continue_page": 2,
+            "accepted_blocks": 1,
+            "total_blocks": 2,
+            "review_complete": False,
             "translation_run_id": run_id,
             "updated_at": catalog.json()["jobs"][0]["updated_at"],
         }

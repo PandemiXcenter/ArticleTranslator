@@ -9,8 +9,9 @@ and compiles the canonical dataset into clean Markdown.
 The repository includes the backend pipeline, CLI, and a small tabbed FastAPI
 interface for colleagues. The interface provides PDF upload, per-job language
 selection, authoritative term mappings, Gemini settings, side-by-side review,
-append-only corrections, qualitative uncertainty review, and reviewed Markdown
-download. It is a loopback-only workstation tool, not a remotely deployed or
+append-only corrections, qualitative uncertainty review, and reviewed Markdown,
+plain-text, and locally typeset PDF downloads. It is a loopback-only workstation
+tool, not a remotely deployed or
 multi-user application.
 
 ## Pipeline
@@ -96,12 +97,11 @@ uv sync --all-groups
 cp config/default.toml config/personal.local.toml
 ```
 
-Start the local interface:
+Start the local interface. The launcher uses `config/personal.local.toml` when it
+exists and otherwise uses the complete checked-in `config/default.toml`:
 
 ```bash
-uv run article-translator \
-  --config config/personal.local.toml \
-  serve
+uv run app
 ```
 
 Open `http://127.0.0.1:8000` unless the selected TOML file configures another
@@ -116,7 +116,7 @@ loopback host or port. The interface is organized as an internal workbench:
   style. A Gemini key can be used for the current browser session, or **Save on
   this computer** can store it locally for later sessions. The saved value is
   never returned to or displayed by the interface.
-- **Review** opens with a catalog of every valid completed translation run found
+- **Articles** opens with a catalog of every valid completed translation run found
   under the configured artifact root. A stable translation-run ID reopens the
   same canonical artifacts after a browser or server restart. The complete
   translated document is mounted and scrollable; only the active physical
@@ -126,8 +126,14 @@ loopback host or port. The interface is organized as an internal workbench:
   Uncertain terms are visibly marked and can be corrected once or, when multiple
   unresolved model-annotated occurrences exist, all at once. **Uncertain terms**
   opens a complete unresolved list ordered from most to least occurrences and
-  can jump to the first marked instance. The reviewed document can be downloaded
-  as Markdown.
+  can jump to the first marked instance. An unfinished article offers **Review**;
+  a fully accepted article offers **Read**. The export menu downloads Markdown,
+  plain text, or a PDF typeset locally with XeLaTeX.
+
+PDF export requires the `xelatex` executable configured under `[pdf_export]`.
+Markdown and plain-text downloads do not require TeX. PDF source is projected
+directly from canonical blocks and effective revisions, compiled with shell
+escape disabled, and removed with its temporary compilation directory.
 
 For each request, the configured provider receives one current-page image and
 that page's complete extracted Markdown. A table-bearing page therefore makes a
@@ -140,7 +146,7 @@ The web server binds only to a configured loopback address. A newly submitted
 translation receives a temporary browser job ID; that alias, its progress record,
 and the bounded execution queue exist only in the running process. Completed
 runs are different: the server discovers their canonical artifacts at startup
-and exposes them by stable translation-run ID in Review. This is filesystem
+and exposes them by stable translation-run ID in Articles. This is filesystem
 discovery, not a database or durable task queue. There is no authentication,
 remote deployment support, or cancellation, so do not expose the server on a
 network.
@@ -215,6 +221,7 @@ contains:
 - name, citation, and qualitative uncertainty policies;
 - finalized previous-page translation context count (0–10, default 2);
 - Markdown page-comment and marginalia behavior;
+- local XeLaTeX executable and bounded PDF compilation timeout;
 - loopback web host/port, upload/page/glossary limits, status polling, and bounded
   local concurrency.
 
@@ -338,7 +345,7 @@ rather than being attached to a guessed run.
 │   ├── architecture.md             # boundaries, contracts, artifact lifecycle
 │   └── roadmap.md                  # backend, editorial, and UI phases
 ├── src/article_translator/
-│   ├── cli.py                      # command inputs and local server command
+│   ├── cli.py                      # command inputs and local app launchers
 │   ├── composition.py              # shared adapter/application wiring
 │   ├── config.py                   # TOML validation + API-key loading
 │   ├── domain/                     # Pydantic contracts, editorial views, errors
@@ -346,6 +353,7 @@ rather than being attached to a guessed run.
 │   ├── application/                # pipeline, jobs, editorial service, export
 │   ├── adapters/
 │   │   ├── extraction/             # MarkItDown + PDFium page pairing
+│   │   ├── export/                 # bounded local XeLaTeX compilation
 │   │   ├── llm/                    # Gemini SDK boundary
 │   │   ├── secrets/                # narrow local GEMINI_API_KEY persistence
 │   │   └── storage/                # atomic machine and revision artifacts
@@ -413,7 +421,7 @@ The live Gemini path has not been verified by the automated suite.
   run's machine checkpoints.
 - In-progress browser job aliases, progress state, and the bounded queue are
   process-local and are lost on restart. Valid completed runs remain available
-  through the filesystem-backed Review catalog and their stable run IDs.
+  through the filesystem-backed Articles catalog and their stable run IDs.
 - The interface has no authentication, remote deployment configuration, durable
   task queue, multi-process coordination, or job cancellation. It is deliberately
   restricted to loopback use.

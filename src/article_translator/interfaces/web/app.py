@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import SecretStr, ValidationError
 from starlette.middleware.base import RequestResponseEndpoint
 
+from article_translator.adapters.export import LatexPdfCompiler
 from article_translator.adapters.secrets import DotenvSecretStore
 from article_translator.adapters.storage import FilesystemArtifactRepository
 from article_translator.application.editorial import EditorialService
@@ -36,6 +37,7 @@ from article_translator.domain.errors import (
     ArtifactError,
     EditorialError,
     EditorialTargetError,
+    PdfExportError,
     ReplaceAllUnavailableError,
     RevisionConflictError,
 )
@@ -48,6 +50,7 @@ from article_translator.interfaces.web.schemas import (
     ReviewPositionRequest,
     UncertaintyReplacementRequest,
 )
+from article_translator.ports.export import PdfCompiler
 
 
 def _asset(name: str) -> str:
@@ -63,6 +66,7 @@ def create_app(
     *,
     job_manager: WebJobManager | None = None,
     secret_store: DotenvSecretStore | None = None,
+    pdf_compiler: PdfCompiler | None = None,
 ) -> FastAPI:
     """Create the local editor without exposing secrets or filesystem paths."""
 
@@ -77,6 +81,10 @@ def create_app(
         ),
     )
     local_secret_store = secret_store or DotenvSecretStore(Path(".env"))
+    local_pdf_compiler = pdf_compiler or LatexPdfCompiler(
+        engine=config.pdf_export.latex_engine,
+        timeout_seconds=config.pdf_export.compile_timeout_seconds,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -304,6 +312,34 @@ def create_app(
             headers={"Content-Disposition": 'attachment; filename="reviewed-translation.md"'},
         )
 
+    @app.get("/api/jobs/{job_id}/export.txt")
+    def export_reviewed_text(job_id: str) -> Response:
+        document, translation_run_id, service, _ = _review_context(manager, job_id)
+        plain_text = service.compile_reviewed_text(
+            document,
+            translation_run_id,
+            config.export,
+        )
+        return Response(
+            plain_text,
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="reviewed-translation.txt"'},
+        )
+
+    @app.get("/api/jobs/{job_id}/export.pdf")
+    def export_reviewed_pdf(job_id: str) -> Response:
+        document, translation_run_id, service, _ = _review_context(manager, job_id)
+        latex = service.compile_reviewed_latex(
+            document,
+            translation_run_id,
+            config.export,
+        )
+        return Response(
+            local_pdf_compiler.compile(latex),
+            media_type="application/pdf",
+            headers={"Content-Disposition": 'attachment; filename="reviewed-translation.pdf"'},
+        )
+
     @app.exception_handler(WebJobNotReadyError)
     def job_not_ready(_: Request, exc: WebJobNotReadyError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=409)
@@ -330,6 +366,13 @@ def create_app(
     @app.exception_handler(EditorialError)
     def editorial_command_failed(_: Request, exc: EditorialError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=422)
+
+    @app.exception_handler(PdfExportError)
+    def pdf_export_failed(_: Request, __: PdfExportError) -> JSONResponse:
+        return JSONResponse(
+            {"detail": "The reviewed PDF could not be generated on this computer"},
+            status_code=503,
+        )
 
     @app.exception_handler(ArtifactError)
     def review_artifact_failed(_: Request, __: ArtifactError) -> JSONResponse:

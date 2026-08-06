@@ -10,6 +10,7 @@ from threading import RLock
 from uuid import uuid4
 
 from article_translator.application.compile_markdown import compile_markdown
+from article_translator.application.export_reviewed import compile_latex, compile_text
 from article_translator.domain.editorial import (
     BlockRevision,
     ReviewBlock,
@@ -249,6 +250,38 @@ class EditorialService:
                 editorial_overrides=effective_text,
             )
 
+    def compile_reviewed_text(
+        self,
+        document: DocumentTranslation,
+        translation_run_id: str,
+        settings: MarkdownExportSettings,
+    ) -> str:
+        """Render the latest editorial text directly as plain text."""
+
+        with self._lock:
+            review = self._review_document_unlocked(document, translation_run_id)
+            return compile_text(
+                document,
+                settings,
+                editorial_overrides=_effective_text_by_block(review),
+            )
+
+    def compile_reviewed_latex(
+        self,
+        document: DocumentTranslation,
+        translation_run_id: str,
+        settings: MarkdownExportSettings,
+    ) -> str:
+        """Render the latest editorial text directly as safe XeLaTeX source."""
+
+        with self._lock:
+            review = self._review_document_unlocked(document, translation_run_id)
+            return compile_latex(
+                document,
+                settings,
+                editorial_overrides=_effective_text_by_block(review),
+            )
+
     def _review_document_unlocked(
         self,
         document: DocumentTranslation,
@@ -411,6 +444,12 @@ def _iter_machine_blocks(document: DocumentTranslation) -> list[TranslatedBlock]
 
 def _iter_review_blocks(document: ReviewDocument) -> list[ReviewBlock]:
     return [block for page in document.pages for block in page.blocks]
+
+
+def _effective_text_by_block(document: ReviewDocument) -> dict[str, str]:
+    return {
+        block.block_id: block.effective_translated_text for block in _iter_review_blocks(document)
+    }
 
 
 def _find_review_block(document: ReviewDocument, block_id: str) -> ReviewBlock:

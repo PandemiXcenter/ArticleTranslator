@@ -100,8 +100,8 @@ Implemented:
 - stable uncertainty highlighting with exact offsets and structured fallback;
 - one-occurrence correction and all-occurrence correction only for multiple
   unresolved model-annotated matches;
-- reviewed Markdown generated from latest effective revisions without mutating
-  canonical machine output;
+- reviewed Markdown, plain text, and LaTeX/PDF generated from latest effective
+  revisions without mutating canonical machine output;
 - revision, conflict, uncertainty, and reproducible export tests.
 
 Deferred:
@@ -118,9 +118,9 @@ Deferred:
 Implemented:
 
 - FastAPI routes for safe public configuration, PDF upload, job progress, review
-  projection, block revision, uncertainty replacement, and Markdown download;
+  projection, block revision, uncertainty replacement, and multi-format download;
 - startup discovery and validation of completed canonical runs under the artifact
-  root, exposed to Review by stable translation-run ID;
+  root, exposed to Articles by stable translation-run ID;
 - bounded background execution in one process;
 - upload size/type/name validation, opaque staging directories, cleanup, CSRF
   checks, no-store headers, and redacted public errors;
@@ -141,7 +141,7 @@ Deferred:
 
 Implemented:
 
-- plain tabbed Translate, Term mappings, Settings, and Review workspace;
+- plain tabbed Translate, Term mappings, Settings, and Articles workspace;
 - laptop PDF selection and language direction on job start;
 - job progress polling;
 - authoritative source-term/required-translation rows;
@@ -160,7 +160,8 @@ Implemented:
   Translate All correction;
 - an Uncertain terms list grouped and ordered by unresolved occurrence count,
   with page locations and first-occurrence navigation;
-- reviewed Markdown download.
+- conditional Review/Read actions based on accepted-block progress;
+- export menus for reviewed Markdown, plain text, and locally typeset XeLaTeX PDF.
 
 Deferred:
 

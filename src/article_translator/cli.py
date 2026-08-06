@@ -21,6 +21,8 @@ app = typer.Typer(
 )
 console = Console()
 error_console = Console(stderr=True)
+DEFAULT_CONFIG_PATH = Path("config/default.toml")
+LOCAL_CONFIG_PATH = Path("config/personal.local.toml")
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,15 +177,31 @@ def show_config(context: typer.Context) -> None:
 def serve(context: typer.Context) -> None:
     """Run the local browser editor."""
 
+    runtime = _runtime(context)
+    _serve_app(runtime.config)
+
+
+def launch_app() -> None:
+    """Launch the local workbench with the conventional repository config."""
+
+    config_path = LOCAL_CONFIG_PATH if LOCAL_CONFIG_PATH.is_file() else DEFAULT_CONFIG_PATH
+    try:
+        config = load_project_config(config_path)
+    except ArticleTranslatorError as exc:
+        error_console.print(f"[red]{type(exc).__name__}:[/red] {exc}")
+        raise SystemExit(1) from exc
+    _serve_app(config)
+
+
+def _serve_app(config: ProjectConfig) -> None:
     import uvicorn
 
     from article_translator.interfaces.web import create_app
 
-    runtime = _runtime(context)
     uvicorn.run(
-        create_app(runtime.config),
-        host=runtime.config.web.host,
-        port=runtime.config.web.port,
+        create_app(config),
+        host=config.web.host,
+        port=config.web.port,
     )
 
 

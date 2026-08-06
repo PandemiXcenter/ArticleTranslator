@@ -571,3 +571,54 @@ def test_reviewed_markdown_projects_effective_text_without_mutating_machine_data
 
     assert markdown == "reviewed\n"
     assert document.pages[0].blocks[0].translated_text == "machine"
+
+
+def test_reviewed_text_and_latex_project_effective_text_directly() -> None:
+    document = _document(_block("p0001-b0001", 1, "kilde", "machine & old"))
+    service = EditorialService(MemoryRevisionRepository())
+    service.revise_block(
+        document,
+        RUN_ID,
+        "p0001-b0001",
+        "reviewed & current",
+        expected_base_revision=0,
+    )
+    settings = MarkdownExportSettings(include_page_comments=True)
+
+    plain_text = service.compile_reviewed_text(document, RUN_ID, settings)
+    latex = service.compile_reviewed_latex(document, RUN_ID, settings)
+
+    assert plain_text == "reviewed & current\n"
+    assert "machine" not in latex
+    assert "reviewed \\& current\\par" in latex
+    assert "% original-page: 1" in latex
+    assert latex.startswith("\\documentclass[11pt,a4paper]{article}")
+    assert latex.endswith("\\end{document}\n")
+
+
+def test_reviewed_latex_converts_canonical_gfm_table_without_floating() -> None:
+    machine = "| Date | Deaths |\n| --- | ---: |\n| 3 July | 3 |"
+    table = TranslatedBlock(
+        block_id="p0001-b0001",
+        original_page_number=1,
+        order=1,
+        type=BlockType.TABLE,
+        source_text=None,
+        translated_text=machine,
+        segment_handling=SegmentHandling.TABLE_RECONSTRUCTION,
+        manual_insertion_reason=ManualInsertionReason.TABLE,
+        continuation=SegmentContinuation.COMPLETE,
+    )
+    service = EditorialService(MemoryRevisionRepository())
+
+    latex = service.compile_reviewed_latex(
+        _document(table),
+        RUN_ID,
+        MarkdownExportSettings(include_page_comments=False),
+    )
+
+    assert "% table-placement: [H!]; original-page: 1; block-id: p0001-b0001" in latex
+    assert "\\begin{longtable}" in latex
+    assert "\\textbf{Date} & \\textbf{Deaths}" in latex
+    assert "3 July & 3" in latex
+    assert "\\begin{table}" not in latex

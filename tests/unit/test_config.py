@@ -25,6 +25,8 @@ def test_default_toml_is_the_complete_non_secret_configuration() -> None:
     assert config.translation.previous_page_context_count == 2
     assert config.extraction.image_dpi == 150
     assert config.export.include_page_comments is True
+    assert config.pdf_export.latex_engine == "xelatex"
+    assert config.pdf_export.compile_timeout_seconds == 120
     assert config.paths.artifacts_dir == Path("artifacts").resolve()
     assert config.web.host == "127.0.0.1"
     assert config.web.max_concurrent_jobs == 1
@@ -83,6 +85,25 @@ def test_previous_page_context_count_is_required_and_bounded(tmp_path: Path) -> 
     with pytest.raises(ConfigurationError, match="previous_page_context_count"):
         load_project_config(missing)
     with pytest.raises(ConfigurationError, match="less than or equal to 10"):
+        load_project_config(invalid)
+
+
+def test_pdf_export_timeout_is_required_and_bounded(tmp_path: Path) -> None:
+    source = Path("config/default.toml").read_text(encoding="utf-8")
+    missing = tmp_path / "missing-pdf-timeout.toml"
+    missing.write_text(
+        source.replace("compile_timeout_seconds = 120\n", ""),
+        encoding="utf-8",
+    )
+    invalid = tmp_path / "invalid-pdf-timeout.toml"
+    invalid.write_text(
+        source.replace("compile_timeout_seconds = 120", "compile_timeout_seconds = 301"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="compile_timeout_seconds"):
+        load_project_config(missing)
+    with pytest.raises(ConfigurationError, match="less than or equal to 300"):
         load_project_config(invalid)
 
 

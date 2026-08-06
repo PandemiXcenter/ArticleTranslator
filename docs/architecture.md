@@ -7,7 +7,7 @@ calls, validate everything persisted, resume safely after failure, and expose
 application boundaries that both the CLI and the implemented local editor use.
 
 The machine `DocumentTranslation` is canonical for its immutable translation
-run. Editorial revisions are append-only. Machine and reviewed Markdown are
+run. Editorial revisions are append-only. Machine and reviewed exports are
 projections, not databases.
 
 ## Dependency direction
@@ -40,11 +40,13 @@ CLI commands                  browser assets
 
 ## Local web execution
 
-The `serve` command constructs the same pipeline and provider adapter used by the
-CLI, then starts FastAPI/Uvicorn on the configured loopback host and port:
+The short launcher constructs the same pipeline and provider adapter used by the
+CLI, then starts FastAPI/Uvicorn on the configured loopback host and port. It
+prefers the conventional personal config when present and otherwise uses the
+checked-in default:
 
 ```bash
-uv run article-translator --config config/personal.local.toml serve
+uv run app
 ```
 
 The server boundary is intentionally small:
@@ -58,7 +60,7 @@ The server boundary is intentionally small:
    and compile in a bounded `ThreadPoolExecutor`.
 4. The browser polls process-local progress. A ready job can be projected through
    `EditorialService` for review, revisions, uncertainty replacement, and
-   reviewed Markdown download.
+   reviewed Markdown, plain-text, and locally typeset PDF downloads.
 5. `GET /api/jobs` lists every validated completed translation run discovered
    under the configured artifact root. Completed-run routes accept the stable
    translation-run ID rather than requiring the browser alias created at upload.
@@ -66,7 +68,7 @@ The server boundary is intentionally small:
    background run. Durable artifacts remain under the configured artifact root.
 
 The manager scans canonical manifests and completed `document.json` artifacts at
-startup and rebuilds the Review catalog. A completed run can therefore be opened
+startup and rebuilds the Articles catalog. A completed run can therefore be opened
 by its stable translation-run ID after either the browser or server restarts. The
 submission-time browser alias, executor queue, in-progress state, and progress
 record still exist only in one server process and are lost on restart. Completed
@@ -351,7 +353,8 @@ present in `selectable_models`; the interface rejects any model outside that
 allowlist. `translation.previous_page_context_count` is a required TOML setting
 bounded from 0 through 10 and defaults to 2 in the checked-in file. Its resolved
 value is persisted with the translation settings and participates in the prompt
-and checkpoint fingerprint.
+and checkpoint fingerprint. `[pdf_export]` selects the constrained local XeLaTeX
+engine and compilation timeout used only for reviewed PDF downloads.
 
 `.env` contains only `GEMINI_API_KEY`. The Settings interface labels persistence
 as **Save on this computer**. Checked persistence writes the key through a narrow
@@ -410,10 +413,15 @@ This small mutable sidecar contains the document/run scope, the latest
 `original_page_number` visited, and its timestamp. It drives **Continue from page
 X** but is not canonical translation data and is not revision history.
 
-The reviewed Markdown route compiles this effective view without changing
-`runs/<run-id>/output/document.json` or its machine `document.md`. The current
-policy uses the latest effective revision whether its status is `in_review`,
-`accepted`, or `needs_work`; an accepted-only export policy is not implemented.
+Reviewed Markdown, plain text, and LaTeX are projected directly from canonical
+blocks plus this effective view; exporters never parse `document.md` to recover
+structure. PDF download passes the generated LaTeX through a configured local
+XeLaTeX adapter with a timeout and shell escape disabled. Temporary compilation
+files are removed after the response bytes are produced. These formats do not
+change `runs/<run-id>/output/document.json` or its machine `document.md`. The
+current policy uses the latest effective revision whether its status is
+`in_review`, `accepted`, or `needs_work`; an accepted-only export policy is not
+implemented.
 
 ## Tabbed colleague interface
 
@@ -425,8 +433,9 @@ The browser interface is intentionally operational rather than promotional:
   for the next job.
 - **Settings** selects an allowlisted Gemini model, translation style, and key
   persistence behavior.
-- **Review** first presents the filesystem-backed catalog of completed runs.
-  Selecting one uses its stable translation-run ID, loads the complete strict
+- **Articles** first presents the filesystem-backed catalog of completed runs,
+  editorial progress, a conditional Review/Read action, and the three-format
+  export menu. Selecting one uses its stable translation-run ID, loads the complete strict
   review projection, and mounts the full translated document. Only the translated
   pane is user-scrollable. Its current `original_page_number` fetches and displays
   that one physical page's original PNG; the browser does not mount every source
@@ -439,8 +448,9 @@ The browser interface is intentionally operational rather than promotional:
   merging their editors or revision histories. Structured uncertainties are
   highlighted and expose one/all replacement according to the service contract.
   The **Uncertain terms** control opens all unresolved groups in descending
-  occurrence order and jumps to the first marked instance. Reviewed Markdown is
-  downloaded from the effective document view.
+  occurrence order and jumps to the first marked instance. Reviewed Markdown,
+  plain text, and locally typeset PDF are downloaded from the effective document
+  view.
 
 The interface does not expose artifact paths, raw provider objects, or raw
 responses. It does not parse `document.md` to rebuild pages or blocks.
@@ -454,7 +464,8 @@ responses. It does not parse `document.md` to rebuild pages or blocks.
   append-only/optimistic semantics.
 - Improved extraction/rendering: implement `PageExtractor` and keep the 1:1 page
   invariant.
-- New export format: project `DocumentTranslation`; do not parse Markdown.
+- New export format: project `DocumentTranslation`; do not parse Markdown or
+  another derivative format.
 - Durable/multi-process execution: replace the process-local submission manager
   behind an application port, then add in-progress recovery, cancellation,
   locking, and queue semantics. The existing completed-run catalog is filesystem
