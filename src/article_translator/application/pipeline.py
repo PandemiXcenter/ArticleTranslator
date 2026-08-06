@@ -21,7 +21,12 @@ from article_translator.application.prompting import (
     build_page_prompt,
     build_table_prompt,
 )
-from article_translator.domain.enums import BlockType, JobStatus, SegmentHandling
+from article_translator.domain.enums import (
+    BlockType,
+    JobStatus,
+    SegmentContinuation,
+    SegmentHandling,
+)
 from article_translator.domain.errors import (
     ArtifactError,
     IncompleteDocumentError,
@@ -233,10 +238,11 @@ class TranslationPipeline:
                             settings=settings,
                         )
                     )
-                    blocks = [
-                        _to_translated_block(page.original_page_number, block)
-                        for block in result.payload.blocks
-                    ]
+                    blocks = _to_translated_blocks(
+                        page.original_page_number,
+                        result.payload.blocks,
+                        previous_page=translated_pages[-1] if translated_pages else None,
+                    )
                     translation = PageTranslation(
                         translation_run_id=translation_run_id,
                         original_page_number=page.original_page_number,
@@ -476,9 +482,52 @@ class TranslationPipeline:
                 )
 
 
+def _to_translated_blocks(
+    original_page_number: int,
+    generated_blocks: list[GeneratedBlockVariant],
+    *,
+    previous_page: PageTranslation | None,
+) -> list[TranslatedBlock]:
+    previous_body = (
+        next(
+            (block for block in reversed(previous_page.blocks) if block.type is BlockType.BODY),
+            None,
+        )
+        if previous_page is not None
+        else None
+    )
+    translated: list[TranslatedBlock] = []
+    for block in generated_blocks:
+        continues_from_block_id = None
+        if (
+            not isinstance(block, (GeneratedManualInsertionBlock, GeneratedFootnoteBlock))
+            and block.type is BlockType.BODY
+            and block.paragraph_continuation
+            in {
+                SegmentContinuation.FROM_PREVIOUS_PAGE,
+                SegmentContinuation.FROM_PREVIOUS_AND_TO_NEXT_PAGE,
+            }
+        ):
+            if previous_body is None:
+                raise ValueError(
+                    "A previous-page paragraph continuation has no preceding body block"
+                )
+            continues_from_block_id = previous_body.block_id
+        translated.append(
+            _to_translated_block(
+                original_page_number,
+                block,
+                continues_from_block_id=continues_from_block_id,
+            )
+        )
+    return translated
+
+
 def _to_translated_block(
     original_page_number: int,
     block: GeneratedBlockVariant,
+    *,
+    continues_from_block_id: str | None = None,
 ) -> TranslatedBlock:
     block_id = f"p{original_page_number:04d}-b{block.order:04d}"
     if isinstance(block, GeneratedManualInsertionBlock):
@@ -516,6 +565,8 @@ def _to_translated_block(
         source_text=block.source_text,
         translated_text=block.translated_text,
         heading_level=block.heading_level,
+        paragraph_continuation=block.paragraph_continuation,
+        continues_from_block_id=continues_from_block_id,
         uncertainties=block.uncertainties,
         segment_handling=SegmentHandling.TRANSLATE,
         classification_review_required=block.classification_review_required,

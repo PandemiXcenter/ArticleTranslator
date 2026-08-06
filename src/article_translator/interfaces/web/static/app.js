@@ -8,6 +8,7 @@ const state = {
   pollFailures: 0,
   blockIndex: new Map(),
   uncertaintyIndex: new Map(),
+  uncertaintyGroups: [],
   reviewPages: [],
   reviewDrafts: new Map(),
   sourcePageNumber: null,
@@ -68,6 +69,10 @@ const sourcePageLabel = document.querySelector("#source-page-label");
 const sourcePageImage = document.querySelector("#source-page-image");
 const fullSizePageLink = document.querySelector("#full-size-page-link");
 const uncertaintyDialog = document.querySelector("#uncertainty-dialog");
+const uncertaintyListButton = document.querySelector("#uncertainty-list-button");
+const uncertaintyListDialog = document.querySelector("#uncertainty-list-dialog");
+const uncertaintyGroupList = document.querySelector("#uncertainty-group-list");
+const uncertaintyGroupEmpty = document.querySelector("#uncertainty-group-empty");
 const uncertaintyForm = document.querySelector("#uncertainty-form");
 const closeUncertaintyButton = document.querySelector("#close-uncertainty");
 const cancelUncertaintyButton = document.querySelector("#cancel-uncertainty");
@@ -1112,6 +1117,10 @@ function makeTranslationBlock(block, page, draftText) {
   article.dataset.baseRevision = asText(block.base_revision, "0");
   const manualInsertion = block.segment_handling === "manual_insertion";
   article.classList.toggle("manual-insertion-block", manualInsertion);
+  article.classList.toggle(
+    "continued-paragraph-block",
+    Boolean(block.continues_from_block_id),
+  );
 
   const meta = createElement("div", "block-meta");
   meta.append(createElement("span", "", humanize(block.type || "text")));
@@ -1123,6 +1132,12 @@ function makeTranslationBlock(block, page, draftText) {
   meta.append(provenance);
   if (block.continuation) {
     meta.append(createElement("span", "continuation", humanize(block.continuation)));
+  }
+  if (block.paragraph_continuation) {
+    const paragraphLabel = block.continues_from_block_id
+      ? `Linked paragraph · ${humanize(block.paragraph_continuation)}`
+      : humanize(block.paragraph_continuation);
+    meta.append(createElement("span", "paragraph-continuation", paragraphLabel));
   }
   if (block.classification_review_required === true) {
     meta.append(createElement("span", "classification-warning", "Check classification"));
@@ -1248,6 +1263,7 @@ function captureDrafts() {
 function buildReviewIndexes(pages) {
   state.blockIndex = new Map();
   state.uncertaintyIndex = new Map();
+  state.uncertaintyGroups = [];
   for (const page of pages) {
     for (const block of Array.isArray(page.blocks) ? page.blocks : []) {
       block.base_revision = Math.max(0, Number(block.base_revision) || 0);
@@ -1265,6 +1281,86 @@ function buildReviewIndexes(pages) {
   }
 }
 
+function renderUncertaintyGroupList(groups) {
+  uncertaintyGroupList.replaceChildren();
+  uncertaintyGroupEmpty.hidden = groups.length > 0;
+  for (const group of groups) {
+    const item = createElement("article", "uncertainty-group-item");
+    item.setAttribute("role", "listitem");
+    const heading = createElement("div", "uncertainty-group-heading");
+    heading.append(
+      createElement("h3", "", asText(group.source_term, "Uncertain passage")),
+      createElement(
+        "span",
+        "uncertainty-count",
+        `${Number(group.occurrence_count) || 1} ${
+          Number(group.occurrence_count) === 1 ? "occurrence" : "occurrences"
+        }`,
+      ),
+    );
+    const details = [];
+    if (group.proposed_translation) {
+      details.push(`Model: ${asText(group.proposed_translation)}`);
+    }
+    const pages = Array.isArray(group.page_numbers)
+      ? group.page_numbers.map(Number).filter(Number.isInteger)
+      : [];
+    if (pages.length) {
+      details.push(`Physical ${pages.length === 1 ? "page" : "pages"} ${pages.join(", ")}`);
+    }
+    const open = createElement(
+      "button",
+      "text-button uncertainty-group-open",
+      "Review first occurrence",
+    );
+    open.type = "button";
+    open.dataset.action = "open-uncertainty-group";
+    open.dataset.uncertaintyId = asText(group.first_uncertainty_id);
+    item.append(heading);
+    if (details.length) {
+      item.append(createElement("p", "uncertainty-group-details", details.join(" · ")));
+    }
+    item.append(createElement("p", "uncertainty-group-reason", asText(group.reason)), open);
+    uncertaintyGroupList.append(item);
+  }
+}
+
+function openUncertaintyList() {
+  if (!state.uncertaintyGroups.length) {
+    return;
+  }
+  uncertaintyListDialog.showModal();
+  requestAnimationFrame(() => {
+    uncertaintyGroupList.querySelector("[data-action='open-uncertainty-group']")?.focus();
+  });
+}
+
+function handleUncertaintyGroupClick(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const button = target?.closest("[data-action='open-uncertainty-group']");
+  if (!button || !uncertaintyGroupList.contains(button)) {
+    return;
+  }
+  const uncertaintyId = asText(button.dataset.uncertaintyId);
+  const entry = state.uncertaintyIndex.get(uncertaintyId);
+  if (!entry) {
+    showGlobalError("This uncertainty is no longer available. Refresh the review.");
+    return;
+  }
+  uncertaintyListDialog.close();
+  const blockElement = [...translationContent.querySelectorAll(".translation-block")].find(
+    (element) => element.dataset.blockId === asText(entry.block.block_id),
+  );
+  if (blockElement) {
+    translationScroll.scrollTop = Math.max(
+      0,
+      elementPositionInScroller(blockElement, translationScroll) - 72,
+    );
+    syncSourceToTranslation();
+  }
+  requestAnimationFrame(() => openUncertainty(uncertaintyId));
+}
+
 function updateReviewSummary() {
   if (!state.review) {
     return;
@@ -1275,6 +1371,12 @@ function updateReviewSummary() {
     (count, block) => count + unresolvedUncertainties(block).length,
     0,
   );
+  state.uncertaintyGroups = Array.isArray(state.review?.uncertainty_groups)
+    ? [...state.review.uncertainty_groups]
+    : [];
+  uncertaintyListButton.disabled = state.uncertaintyGroups.length === 0;
+  uncertaintyListButton.textContent = `Uncertain terms (${uncertain})`;
+  renderUncertaintyGroupList(state.uncertaintyGroups);
   const classificationChecks = blocks.filter(
     (block) => block.classification_review_required === true,
   ).length;
@@ -1924,6 +2026,7 @@ function resetForNewTranslation() {
   state.review = null;
   state.blockIndex = new Map();
   state.uncertaintyIndex = new Map();
+  state.uncertaintyGroups = [];
   state.reviewPages = [];
   state.reviewDrafts = new Map();
   state.sourcePageNumber = null;
@@ -1932,6 +2035,9 @@ function resetForNewTranslation() {
   sourcePageImage.removeAttribute("src");
   fullSizePageLink.href = "#";
   translationContent.replaceChildren();
+  uncertaintyGroupList.replaceChildren();
+  uncertaintyListButton.disabled = true;
+  uncertaintyListButton.textContent = "Uncertain terms (0)";
   if (state.scrollFrame !== null) {
     cancelAnimationFrame(state.scrollFrame);
     state.scrollFrame = null;
@@ -2013,6 +2119,8 @@ geminiApiKey.addEventListener("input", () => {
 
 closeUncertaintyButton.addEventListener("click", closeUncertainty);
 cancelUncertaintyButton.addEventListener("click", closeUncertainty);
+uncertaintyListButton.addEventListener("click", openUncertaintyList);
+uncertaintyGroupList.addEventListener("click", handleUncertaintyGroupClick);
 translateOneButton.addEventListener("click", () => replaceUncertainty("one"));
 translateAllButton.addEventListener("click", () => replaceUncertainty("all"));
 uncertaintyForm.addEventListener("submit", (event) => {

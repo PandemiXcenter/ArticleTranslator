@@ -154,7 +154,7 @@ Never overload the phrase “page number”:
 
 Every request contains exactly one current-page PNG, that page's complete
 Markdown, and the fully resolved translation settings. The primary pass uses
-`translate-page-v4`. When that pass tags at least one table or table-like region,
+`translate-page-v5`. When that pass tags at least one table or table-like region,
 the pipeline immediately makes one additional batched request for that page using
 `reconstruct-tables-v1`; it sends the same PNG and complete page MarkItDown/OCR,
 plus the first-pass segmentation and exact table targets. Multiple table regions
@@ -185,13 +185,22 @@ provider metadata, block IDs, hashes, token counts, and timestamps. The current
 page's full image and Markdown remain the only raw page evidence in each request.
 
 The projection is visibly delimited and the prompt requires current-page-only
-output: prior content must not be repeated, revised, or moved. This supports
-current-page interpretation of split words, sentences, terminology, headings,
-footnotes, and continued tables. It cannot retroactively revise a trailing
-fragment already persisted on a previous page. Because prior finalized output is
-embedded in the exact prompt, context content and window size participate in
-checkpoint identity while page artifacts remain independently serializable and
-resumable.
+output: prior content must not be repeated, revised, or moved. Every current
+`body` block carries the required `paragraph_continuation` state; non-body text
+uses null. The next page decides whether its first body block continues the
+preceding page's final body block. When confirmed, the pipeline—not the model—adds
+`continues_from_block_id` using trusted block identity. Only the first main-flow
+body can continue from a prior page and only the last main-flow body can remain
+unfinished at the next boundary.
+
+Canonical fragments remain page-local, independently checkpointed, and separately
+revisable. The compiler follows the trusted link and emits both fragments as one
+Markdown paragraph. With page comments enabled, the new physical-page marker is
+inline at the join and names the linked prior block. The current page can confirm
+continuity but cannot retroactively revise the already persisted prior fragment.
+Because prior finalized output is embedded in the exact prompt, context content
+and window size participate in checkpoint identity while page artifacts remain
+independently serializable and resumable.
 
 ### Historical-page segment policy
 
@@ -218,6 +227,10 @@ qualitative uncertainties remain structured. Each completed table block has
 continuation, contains machine Markdown in `translated_text`, and leaves
 `source_text` null because it is not represented as an exact cell transcription.
 A continued table still produces one page-local table per physical page.
+The compiler emits each reconstructed or reviewer-entered table exactly at its
+ordered block position between surrounding paragraphs. An invisible
+`table-placement: [H!]` comment records here-placement, physical page, and block
+identity without wrapping the GFM table in a floating layout construct.
 
 Figures are not sent through the table follow-up. They remain ordered, text-free
 manual-insertion blocks for the reviewer.
@@ -248,7 +261,10 @@ occurrences by the structured term identity and is allowed only when more than
 one annotated match exists; it never performs unrestricted global string
 replacement. If an uncertainty cannot be aligned, the review projection retains
 its reason and alternatives as a whole-block fallback rather than inventing an
-offset.
+offset. The web projection additionally groups every unresolved highlight and
+fallback by structured term identity, sorts groups by descending occurrence
+count with deterministic textual tie-breakers, and exposes the first occurrence
+and physical pages for the Review list.
 
 ## Checkpoints and failure behavior
 
@@ -419,9 +435,12 @@ The browser interface is intentionally operational rather than promotional:
   mapping controls use stable container-level delegated handlers rather than one
   listener per element. Each block distinguishes immutable machine translation
   from the latest append-only manual revision. Editing and validation append
-  revisions. Structured uncertainties are highlighted and expose one/all
-  replacement according to the service contract. Reviewed Markdown is downloaded
-  from the effective document view.
+  revisions. Linked paragraph fragments display their continuation state without
+  merging their editors or revision histories. Structured uncertainties are
+  highlighted and expose one/all replacement according to the service contract.
+  The **Uncertain terms** control opens all unresolved groups in descending
+  occurrence order and jumps to the first marked instance. Reviewed Markdown is
+  downloaded from the effective document view.
 
 The interface does not expose artifact paths, raw provider objects, or raw
 responses. It does not parse `document.md` to rebuild pages or blocks.

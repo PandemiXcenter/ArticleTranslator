@@ -379,7 +379,10 @@ def test_manual_insertion_starts_empty_and_exports_only_reviewer_text() -> None:
         RUN_ID,
         MarkdownExportSettings(include_page_comments=False),
     )
-    assert reviewed == "| Age | Cases |\n| --- | --- |\n| 20 | 4 |\n"
+    assert reviewed == (
+        "<!-- table-placement: [H!]; original-page: 1; block-id: p0001-b0001 -->\n"
+        "| Age | Cases |\n| --- | --- |\n| 20 | 4 |\n"
+    )
     assert document.pages[0].blocks[0].translated_text is None
 
 
@@ -419,14 +422,11 @@ def test_reconstructed_table_starts_from_machine_markdown_and_keeps_revision_his
     assert current.machine_translated_text == machine
     assert current.effective_translated_text == revised
     assert document.pages[0].blocks[0].translated_text == machine
-    assert (
-        service.compile_reviewed_markdown(
-            document,
-            RUN_ID,
-            MarkdownExportSettings(include_page_comments=False),
-        )
-        == f"{revised}\n"
-    )
+    assert service.compile_reviewed_markdown(
+        document,
+        RUN_ID,
+        MarkdownExportSettings(include_page_comments=False),
+    ) == (f"<!-- table-placement: [H!]; original-page: 1; block-id: p0001-b0001 -->\n{revised}\n")
 
 
 def test_translate_all_changes_only_machine_annotated_occurrences() -> None:

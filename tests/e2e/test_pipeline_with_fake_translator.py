@@ -105,6 +105,7 @@ class FakeTranslator:
                         type=BlockType.BODY,
                         source_text=request.markdown,
                         translated_text=f"Translated page {request.original_page_number}",
+                        paragraph_continuation=SegmentContinuation.COMPLETE,
                     )
                 ]
             ),
@@ -117,6 +118,31 @@ class FakeTranslator:
     ) -> TableReconstructionResult:
         raise AssertionError(
             f"Unexpected table reconstruction on page {request.original_page_number}"
+        )
+
+
+class ParagraphContinuityTranslator(FakeTranslator):
+    def translate_page(self, request: PageTranslationRequest) -> ProviderResult:
+        self.calls.append(request.original_page_number)
+        self.prompts[request.original_page_number] = request.prompt
+        if request.original_page_number == 1:
+            translated_text = "The paragraph begins"
+            continuation = SegmentContinuation.TO_NEXT_PAGE
+        else:
+            translated_text = "and ends on page two."
+            continuation = SegmentContinuation.FROM_PREVIOUS_PAGE
+        return ProviderResult(
+            payload=GeneratedPagePayload(
+                blocks=[
+                    GeneratedBlock(
+                        order=1,
+                        type=BlockType.BODY,
+                        source_text=request.markdown,
+                        translated_text=translated_text,
+                        paragraph_continuation=continuation,
+                    )
+                ]
+            )
         )
 
 
@@ -179,6 +205,7 @@ class SegmentingTranslator:
                             type=BlockType.BODY,
                             source_text="Indledning",
                             translated_text="Introduction",
+                            paragraph_continuation=SegmentContinuation.COMPLETE,
                         ),
                         GeneratedManualInsertionBlock(
                             order=2,
@@ -360,6 +387,30 @@ def test_pipeline_supplies_finalized_previous_translation_as_page_context(
     assert "Source page 1" in second_context
     assert "Translated page 1" in second_context
     assert "response_id" not in second_context
+
+
+def test_pipeline_links_next_page_confirmed_paragraph_continuation(tmp_path: Path) -> None:
+    pipeline, job_dir = _prepared_job(tmp_path)
+    translator = ParagraphContinuityTranslator()
+
+    document = pipeline.translate_document(
+        job_dir,
+        settings=TranslationSettings(previous_page_context_count=1),
+        translator=translator,
+    )
+    first = document.pages[0].blocks[0]
+    second = document.pages[1].blocks[0]
+
+    assert first.paragraph_continuation is SegmentContinuation.TO_NEXT_PAGE
+    assert second.paragraph_continuation is SegmentContinuation.FROM_PREVIOUS_PAGE
+    assert second.continues_from_block_id == first.block_id
+    assert '"paragraph_continuation": "to_next_page"' in translator.prompts[2]
+
+    output = pipeline.compile_document(job_dir, settings=MarkdownExportSettings())
+    assert (
+        "The paragraph begins <!-- original-page: 2; continues-from: p0001-b0001 --> "
+        "and ends on page two."
+    ) in output.read_text(encoding="utf-8")
 
 
 def test_pipeline_maps_provider_variants_to_trusted_compatible_blocks(tmp_path: Path) -> None:

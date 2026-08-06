@@ -119,6 +119,7 @@ def test_index_and_public_config_never_expose_secret(tmp_path: Path) -> None:
         "Translated text",
         "Translate One",
         "Translate All",
+        "Uncertain terms (0)",
     ):
         assert expected_control in index.text
     assert index.headers["cache-control"] == "no-store"
@@ -200,9 +201,15 @@ def test_review_frontend_mounts_all_pages_and_uses_delegated_handlers(
     assert 'translationContent.addEventListener("click", handleReviewClick)' in javascript
     assert 'translationContent.addEventListener("input", handleReviewInput)' in javascript
     assert 'translationContent.addEventListener("paste", handleReviewPaste)' in javascript
+    assert 'uncertaintyGroupList.addEventListener("click", handleUncertaintyGroupClick)' in (
+        javascript
+    )
     assert 'mappingBody.addEventListener("click", handleMappingClick)' in javascript
     assert "Machine-reconstructed table" in javascript
     assert "Show original machine reconstruction" in javascript
+    assert "function renderUncertaintyGroupList" in javascript
+    assert "open-uncertainty-group" in javascript
+    assert "continued-paragraph-block" in javascript
     assert "Table-bearing pages send that page again" in html
     assert "previous_page_context_count" in javascript
 
@@ -214,8 +221,13 @@ def test_review_frontend_mounts_all_pages_and_uses_delegated_handlers(
         "function captureDrafts",
         1,
     )[0]
+    uncertainty_factory = javascript.split("function renderUncertaintyGroupList", 1)[1].split(
+        "function openUncertaintyList",
+        1,
+    )[0]
     assert ".addEventListener" not in mapping_factory
     assert ".addEventListener" not in review_factory
+    assert ".addEventListener" not in uncertainty_factory
 
 
 def test_upload_requires_csrf_and_confines_hostile_filename(tmp_path: Path) -> None:

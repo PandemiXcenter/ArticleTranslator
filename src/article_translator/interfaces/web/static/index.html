@@ -333,6 +333,15 @@
             <div class="review-actions">
               <span id="review-progress" class="review-progress"></span>
               <button
+                id="uncertainty-list-button"
+                class="secondary-button compact-control"
+                data-testid="uncertainty-list-button"
+                type="button"
+                aria-haspopup="dialog"
+                aria-controls="uncertainty-list-dialog"
+                disabled
+              >Uncertain terms (0)</button>
+              <button
                 id="back-to-translations"
                 class="secondary-button compact-control"
                 type="button"
@@ -399,6 +408,28 @@
         </div>
       </section>
     </main>
+
+    <dialog
+      id="uncertainty-list-dialog"
+      class="uncertainty-dialog uncertainty-list-dialog"
+      aria-labelledby="uncertainty-list-title"
+    >
+      <form method="dialog">
+        <button
+          class="dialog-close"
+          type="submit"
+          aria-label="Close uncertain terms list"
+        >×</button>
+        <h2 id="uncertainty-list-title">Uncertain terms</h2>
+        <p class="dialog-introduction">
+          Unresolved terms are ordered by number of marked occurrences.
+        </p>
+        <div id="uncertainty-group-list" class="uncertainty-group-list" role="list"></div>
+        <p id="uncertainty-group-empty" class="empty-message">
+          No unresolved uncertain terms remain.
+        </p>
+      </form>
+    </dialog>
 
     <dialog id="uncertainty-dialog" class="uncertainty-dialog" aria-labelledby="uncertainty-title">
       <form id="uncertainty-form" method="dialog">

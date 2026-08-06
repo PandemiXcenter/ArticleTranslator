@@ -24,12 +24,15 @@ def compile_markdown(
     """Project canonical data and optional effective editorial text into Markdown."""
 
     overrides = editorial_overrides or {}
-    rendered_pages: list[str] = []
+    parts: list[str] = []
+    part_by_block_id: dict[str, int] = {}
     for page in document.pages:
-        parts: list[str] = []
-        if settings.include_page_comments:
-            parts.append(f"<!-- original-page: {page.original_page_number} -->")
-
+        page_marker = (
+            f"<!-- original-page: {page.original_page_number} -->"
+            if settings.include_page_comments
+            else None
+        )
+        page_has_output = False
         list_items: list[str] = []
 
         for block in page.blocks:
@@ -40,23 +43,67 @@ def compile_markdown(
                 if effective_text is not None:
                     list_items.append(_render_list_item(effective_text))
                 continue
-            _flush_list(parts, list_items)
+            if _flush_list(parts, list_items):
+                if page_marker is not None:
+                    parts.insert(len(parts) - 1, page_marker)
+                    page_marker = None
+                page_has_output = True
             rendered = _render_block(block, effective_text)
-            if rendered:
+            if not rendered:
+                continue
+            target_index = (
+                part_by_block_id.get(block.continues_from_block_id)
+                if block.continues_from_block_id is not None
+                else None
+            )
+            if target_index is not None and not page_has_output:
+                boundary = (
+                    f"<!-- original-page: {page.original_page_number}; "
+                    f"continues-from: {block.continues_from_block_id} -->"
+                    if settings.include_page_comments
+                    else None
+                )
+                parts[target_index] = _join_paragraph_parts(
+                    parts[target_index],
+                    rendered,
+                    boundary,
+                )
+                part_by_block_id[block.block_id] = target_index
+                page_marker = None
+            else:
+                if page_marker is not None:
+                    parts.append(page_marker)
+                    page_marker = None
                 parts.append(rendered)
-        _flush_list(parts, list_items)
+                part_by_block_id[block.block_id] = len(parts) - 1
+            page_has_output = True
+        if _flush_list(parts, list_items):
+            if page_marker is not None:
+                parts.insert(len(parts) - 1, page_marker)
+                page_marker = None
+            page_has_output = True
 
-        if parts:
-            rendered_pages.append("\n\n".join(parts))
+        if page_marker is not None:
+            parts.append(page_marker)
 
-    rendered_document = "\n\n".join(rendered_pages).rstrip()
+    rendered_document = "\n\n".join(parts).rstrip()
     return f"{rendered_document}\n" if rendered_document else ""
 
 
-def _flush_list(parts: list[str], list_items: list[str]) -> None:
+def _flush_list(parts: list[str], list_items: list[str]) -> bool:
     if list_items:
         parts.append("\n".join(list_items))
         list_items.clear()
+        return True
+    return False
+
+
+def _join_paragraph_parts(left: str, right: str, boundary: str | None) -> str:
+    components = [left.rstrip()]
+    if boundary is not None:
+        components.append(boundary)
+    components.append(right.lstrip())
+    return " ".join(components)
 
 
 def _should_include(block: TranslatedBlock, settings: MarkdownExportSettings) -> bool:
@@ -72,7 +119,8 @@ def _should_include(block: TranslatedBlock, settings: MarkdownExportSettings) ->
 def _render_block(block: TranslatedBlock, effective_text: str | None) -> str:
     if block.segment_handling is SegmentHandling.MANUAL_INSERTION:
         if effective_text is not None and effective_text.strip():
-            return effective_text.strip()
+            text = effective_text.strip()
+            return _place_table(block, text) if block.type is BlockType.TABLE else text
         reason = "Table, table-like material, or figure"
         if block.manual_insertion_reason is not None:
             reason = {
@@ -80,15 +128,19 @@ def _render_block(block: TranslatedBlock, effective_text: str | None) -> str:
                 ManualInsertionReason.TABLE_LIKE: "Table-like material",
                 ManualInsertionReason.FIGURE: "Figure",
             }[block.manual_insertion_reason]
-        return (
+        placeholder = (
             f"> **Manual insertion required:** {reason} on original page "
             f"{block.original_page_number} (`{block.block_id}`)."
         )
+        return _place_table(block, placeholder) if block.type is BlockType.TABLE else placeholder
     if effective_text is None:
         return ""
     text = effective_text.strip()
     if not text:
         return ""
+
+    if block.type is BlockType.TABLE:
+        return _place_table(block, text)
 
     if block.type is BlockType.TITLE:
         return f"# {_single_line(text)}"
@@ -117,6 +169,14 @@ def _render_list_item(text: str) -> str:
     if not lines:
         return ""
     return "\n".join([f"- {lines[0]}", *(f"  {line}" for line in lines[1:])])
+
+
+def _place_table(block: TranslatedBlock, text: str) -> str:
+    anchor = (
+        f"<!-- table-placement: [H!]; original-page: {block.original_page_number}; "
+        f"block-id: {block.block_id} -->"
+    )
+    return f"{anchor}\n{text}"
 
 
 def _single_line(text: str) -> str:

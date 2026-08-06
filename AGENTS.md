@@ -140,6 +140,14 @@ Markdown.
   current-page-only output and must never repeat, revise, or move prior content.
   This context can help interpret split words and continuations on the current
   page; it cannot retroactively repair a previously finalized page.
+- Every new body block carries `paragraph_continuation`; non-body text uses null.
+  Only the first main-flow body may continue from the preceding physical page and
+  only the final main-flow body may remain unfinished. When the next page confirms
+  continuity, the pipeline adds `continues_from_block_id` to the preceding page's
+  final body block. The model never owns or returns that trusted link.
+- Canonical paragraph fragments remain page-local. Markdown compilation joins a
+  confirmed link into one paragraph and puts the new physical-page marker inline
+  at the join; editorial revisions remain scoped to the original blocks.
 - The pipeline owns IDs, physical page provenance, hashes, provider/model,
   prompt/schema versions, token metadata, timestamps, and fingerprints.
 - Pages are independently serializable, retriable, cacheable, and resumable.
@@ -263,7 +271,7 @@ library when adequate.
 - Edit the resource under `prompts/`, not an inline provider string.
 - Bump `PROMPT_VERSION` for a semantic main-pass change and
   `TABLE_PROMPT_VERSION` for a semantic table-pass change. The current contracts
-  are `translate-page-v4` and `reconstruct-tables-v1`.
+  are `translate-page-v5` and `reconstruct-tables-v1`.
 - Keep page Markdown visibly delimited as document data.
 - Delimit any previous finalized page projection as untrusted, read-only context
   and require current-page-only output.
@@ -337,11 +345,13 @@ library when adequate.
   block, uncertainty, editor, or mapping row.
 - Present `table_reconstruction` as machine-reconstructed table content, not as
   exact source transcription or reviewer-authored text. Preserve the append-only
-  revision path for corrections.
+  revision path for corrections. Emit every table at its canonical ordered block
+  position with the invisible `[H!]` placement anchor.
 - Render uncertainty text from structured offsets or the structured whole-block
   fallback. Offer one-occurrence replacement always for a range highlight and
   all-occurrence replacement only when the API says more than one unresolved
-  annotated match exists.
+  annotated match exists. The Review uncertainty list groups unresolved items by
+  structured term identity and orders groups by descending occurrence count.
 - Keep exporter policy explicit. The current reviewed download uses the latest
   effective revision, regardless of review status; do not silently change it to
   accepted-only behavior.

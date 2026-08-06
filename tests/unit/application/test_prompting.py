@@ -91,6 +91,9 @@ def test_prompt_contains_resolved_settings_and_delimited_page_markdown() -> None
     assert "printer\n   signatures" in prompt
     assert 'type="figure"' in prompt
     assert "classification_review_required=true" in prompt
+    assert "paragraph_continuation" in prompt
+    assert "unfinished-paragraph variable" in prompt
+    assert "whether the first body block continues" in prompt
     assert "SOURCE_MARKDOWN_START\n# Om Kolera\nSOURCE_MARKDOWN_END" in prompt
 
 
@@ -111,6 +114,7 @@ def test_prompt_includes_only_configured_previous_finalized_page_context() -> No
     assert '"original_page_number": 3' in context
     assert "translation-2" in context
     assert "translation-3" in context
+    assert '"paragraph_continuation": null' in context
     assert "translation-1" not in context
     assert "block_id" not in context
     assert "provider" not in context

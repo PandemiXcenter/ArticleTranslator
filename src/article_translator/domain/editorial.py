@@ -13,6 +13,7 @@ from article_translator.domain.enums import (
     SegmentHandling,
 )
 from article_translator.domain.models import (
+    BlockId,
     ContractModel,
     NonEmptyText,
     Sha256,
@@ -108,6 +109,8 @@ class ReviewBlock(ContractModel):
     manual_insertion_reason: ManualInsertionReason | None = None
     footnote_marker: str | None = None
     continuation: SegmentContinuation | None = None
+    paragraph_continuation: SegmentContinuation | None = None
+    continues_from_block_id: BlockId | None = None
     classification_review_required: bool = False
     latest_revision_number: int = Field(ge=0)
     review_status: ReviewStatus
@@ -157,6 +160,24 @@ class ReviewBlock(ContractModel):
             and (self.footnote_marker is not None or self.continuation is not None)
         ):
             raise ValueError("footnote metadata is valid only for footnote review blocks")
+        if self.type is not BlockType.BODY and (
+            self.paragraph_continuation is not None or self.continues_from_block_id is not None
+        ):
+            raise ValueError("paragraph continuity is valid only for body review blocks")
+        if self.continues_from_block_id is not None and self.paragraph_continuation not in {
+            SegmentContinuation.FROM_PREVIOUS_PAGE,
+            SegmentContinuation.FROM_PREVIOUS_AND_TO_NEXT_PAGE,
+        }:
+            raise ValueError("a linked review block must continue from the previous page")
+        if (
+            self.paragraph_continuation
+            in {
+                SegmentContinuation.FROM_PREVIOUS_PAGE,
+                SegmentContinuation.FROM_PREVIOUS_AND_TO_NEXT_PAGE,
+            }
+            and self.continues_from_block_id is None
+        ):
+            raise ValueError("an incoming review paragraph must retain its block link")
         highlight_ids = [item.uncertainty_id for item in self.uncertainty_highlights]
         if len(highlight_ids) != len(set(highlight_ids)):
             raise ValueError("uncertainty highlight IDs must be unique within a block")

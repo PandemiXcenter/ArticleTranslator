@@ -52,6 +52,7 @@ def test_gemini_adapter_maps_multimodal_structured_output(tmp_path: Path) -> Non
                 type=BlockType.TITLE,
                 source_text="Titel",
                 translated_text="Title",
+                paragraph_continuation=None,
             )
         ],
     )

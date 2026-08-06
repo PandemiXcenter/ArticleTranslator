@@ -42,6 +42,28 @@ def artifact(path: str, media_type: str) -> ArtifactRef:
     )
 
 
+def translated_page(number: int, *blocks: TranslatedBlock) -> PageTranslation:
+    return PageTranslation(
+        translation_run_id=RUN_ID,
+        original_page_number=number,
+        extraction_status=ExtractionStatus.EXTRACTED,
+        extracted_character_count=10,
+        source_markdown="source OCR",
+        source_markdown_artifact=artifact(
+            f"prepared/{number:04d}/source.md",
+            "text/markdown",
+        ),
+        source_image=artifact(f"prepared/{number:04d}/page.png", "image/png"),
+        blocks=list(blocks),
+        input_fingerprint=HASH,
+        provider=ProviderMetadata(
+            provider="fake",
+            model="fake-v1",
+            prompt_version="translate-page-v5",
+        ),
+    )
+
+
 def test_generated_payload_requires_contiguous_reading_order() -> None:
     with pytest.raises(ValidationError, match="block order must be contiguous"):
         GeneratedPagePayload(
@@ -51,6 +73,7 @@ def test_generated_payload_requires_contiguous_reading_order() -> None:
                     type=BlockType.BODY,
                     source_text="Kilde",
                     translated_text="Source",
+                    paragraph_continuation=SegmentContinuation.COMPLETE,
                 )
             ]
         )
@@ -153,7 +176,160 @@ def test_generated_table_cannot_use_translation_handling() -> None:
             type=BlockType.TABLE,
             source_text="1  2  3",
             translated_text="1  2  3",
+            paragraph_continuation=None,
         )
+
+
+def test_generated_body_requires_paragraph_continuation_and_limits_page_edges() -> None:
+    with pytest.raises(ValidationError, match="paragraph_continuation"):
+        GeneratedBlock.model_validate(
+            {
+                "order": 1,
+                "type": "body",
+                "source_text": "Uafsluttet",
+                "translated_text": "Unfinished",
+            }
+        )
+
+    first = GeneratedBlock(
+        order=1,
+        type=BlockType.BODY,
+        source_text="Fortsat",
+        translated_text="Continued",
+        paragraph_continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
+    )
+    second = GeneratedBlock(
+        order=2,
+        type=BlockType.BODY,
+        source_text="Ny tekst",
+        translated_text="New text",
+        paragraph_continuation=SegmentContinuation.COMPLETE,
+    )
+    assert GeneratedPagePayload(blocks=[first, second]).blocks[0] == first
+
+    with pytest.raises(ValidationError, match="first body block"):
+        GeneratedPagePayload(
+            blocks=[
+                second.model_copy(update={"order": 1}),
+                first.model_copy(update={"order": 2}),
+            ]
+        )
+
+
+def test_non_body_generated_text_requires_null_paragraph_continuation() -> None:
+    with pytest.raises(ValidationError, match="valid only for body blocks"):
+        GeneratedBlock(
+            order=1,
+            type=BlockType.TITLE,
+            source_text="Titel",
+            translated_text="Title",
+            paragraph_continuation=SegmentContinuation.COMPLETE,
+        )
+
+
+def test_persisted_page_rejects_paragraph_continuation_away_from_flow_edge() -> None:
+    first = TranslatedBlock(
+        block_id="p0002-b0001",
+        original_page_number=2,
+        order=1,
+        type=BlockType.BODY,
+        source_text="Ny tekst",
+        translated_text="New text",
+        paragraph_continuation=SegmentContinuation.COMPLETE,
+    )
+    incoming = TranslatedBlock(
+        block_id="p0002-b0002",
+        original_page_number=2,
+        order=2,
+        type=BlockType.BODY,
+        source_text="Fortsat",
+        translated_text="Continued",
+        paragraph_continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
+        continues_from_block_id="p0001-b0001",
+    )
+
+    with pytest.raises(ValidationError, match="first body block"):
+        translated_page(2, first, incoming)
+
+    with pytest.raises(ValidationError, match="last body block"):
+        translated_page(
+            2,
+            first.model_copy(update={"paragraph_continuation": SegmentContinuation.TO_NEXT_PAGE}),
+            incoming.model_copy(
+                update={
+                    "paragraph_continuation": SegmentContinuation.COMPLETE,
+                    "continues_from_block_id": None,
+                }
+            ),
+        )
+
+    leading_footnote = TranslatedBlock(
+        block_id="p0002-b0001",
+        original_page_number=2,
+        order=1,
+        type=BlockType.FOOTNOTE,
+        source_text="Fortsat note",
+        translated_text="Continued note",
+        footnote_marker=None,
+        continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
+    )
+    with pytest.raises(ValidationError, match="first main-flow block"):
+        translated_page(
+            2,
+            leading_footnote,
+            incoming.model_copy(update={"block_id": "p0002-b0002"}),
+        )
+
+
+def test_document_paragraph_link_targets_previous_page_final_body() -> None:
+    first = TranslatedBlock(
+        block_id="p0001-b0001",
+        original_page_number=1,
+        order=1,
+        type=BlockType.BODY,
+        source_text="Første",
+        translated_text="First",
+        paragraph_continuation=SegmentContinuation.COMPLETE,
+    )
+    final = first.model_copy(
+        update={
+            "block_id": "p0001-b0002",
+            "order": 2,
+            "source_text": "Anden",
+            "translated_text": "Second",
+            "paragraph_continuation": SegmentContinuation.TO_NEXT_PAGE,
+        }
+    )
+    incoming = TranslatedBlock(
+        block_id="p0002-b0001",
+        original_page_number=2,
+        order=1,
+        type=BlockType.BODY,
+        source_text="fortsat.",
+        translated_text="continued.",
+        paragraph_continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
+        continues_from_block_id=first.block_id,
+    )
+    fields = {
+        "translation_run_id": RUN_ID,
+        "document_id": HASH,
+        "job_id": "job-one",
+        "source_file_name": "source.pdf",
+        "source_file_sha256": HASH,
+        "page_count": 2,
+        "translation_settings": TranslationSettings(),
+        "pages": [translated_page(1, first, final), translated_page(2, incoming)],
+        "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+    }
+
+    with pytest.raises(ValidationError, match="final body block"):
+        DocumentTranslation.model_validate(fields)
+
+    linked = incoming.model_copy(update={"continues_from_block_id": final.block_id})
+    document = DocumentTranslation.model_validate(
+        {**fields, "pages": [translated_page(1, first, final), translated_page(2, linked)]}
+    )
+    assert DocumentTranslation.model_validate_json(document.model_dump_json()) == document
 
 
 def test_generated_footnote_requires_explicit_continuation_metadata() -> None:
@@ -182,13 +358,15 @@ def test_generated_footnote_requires_explicit_continuation_metadata() -> None:
 
 
 def test_provider_schema_uses_strict_block_variants() -> None:
-    block_items = GeneratedPagePayload.model_json_schema()["properties"]["blocks"]["items"]
+    schema = GeneratedPagePayload.model_json_schema()
+    block_items = schema["properties"]["blocks"]["items"]
 
     assert [item["$ref"] for item in block_items["anyOf"]] == [
         "#/$defs/GeneratedTextBlock",
         "#/$defs/GeneratedFootnoteBlock",
         "#/$defs/GeneratedManualInsertionBlock",
     ]
+    assert "paragraph_continuation" in schema["$defs"]["GeneratedTextBlock"]["required"]
 
 
 def test_generated_figure_requires_figure_reason() -> None:

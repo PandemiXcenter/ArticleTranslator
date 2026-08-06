@@ -142,6 +142,7 @@ def test_compiler_marks_unresolved_manual_insertion_and_uses_reviewer_markdown()
         MarkdownExportSettings(include_page_comments=False),
     )
     assert unresolved == (
+        "<!-- table-placement: [H!]; original-page: 1; block-id: p0001-b0001 -->\n"
         "> **Manual insertion required:** Table-like material on original page 1 (`p0001-b0001`).\n"
     )
     assert (
@@ -152,7 +153,8 @@ def test_compiler_marks_unresolved_manual_insertion_and_uses_reviewer_markdown()
                 manual.block_id: "| Month | Cases |\n| --- | ---: |\n| January | 12 |"
             },
         )
-        == "| Month | Cases |\n| --- | ---: |\n| January | 12 |\n"
+        == "<!-- table-placement: [H!]; original-page: 1; block-id: p0001-b0001 -->\n"
+        "| Month | Cases |\n| --- | ---: |\n| January | 12 |\n"
     )
 
 
@@ -193,8 +195,86 @@ def test_compiler_emits_machine_reconstructed_table_markdown_exactly() -> None:
             reconstructed_document,
             MarkdownExportSettings(include_page_comments=False),
         )
-        == f"{markdown}\n"
+        == "<!-- table-placement: [H!]; original-page: 1; block-id: p0001-b0001 -->\n"
+        f"{markdown}\n"
     )
+
+
+def test_compiler_links_confirmed_cross_page_body_as_one_paragraph() -> None:
+    base = document()
+    first = TranslatedBlock(
+        block_id="p0001-b0001",
+        original_page_number=1,
+        order=1,
+        type=BlockType.BODY,
+        source_text="Første halvdel",
+        translated_text="The first half",
+        paragraph_continuation=SegmentContinuation.TO_NEXT_PAGE,
+    )
+    second = TranslatedBlock(
+        block_id="p0002-b0001",
+        original_page_number=2,
+        order=1,
+        type=BlockType.BODY,
+        source_text="anden halvdel.",
+        translated_text="the second half.",
+        paragraph_continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
+        continues_from_block_id=first.block_id,
+    )
+    first_page = base.pages[0].model_copy(update={"blocks": [first]})
+    second_page = PageTranslation(
+        **{
+            **base.pages[0].model_dump(mode="python"),
+            "original_page_number": 2,
+            "blocks": [second],
+        }
+    )
+    continued_document = base.model_copy(
+        update={"page_count": 2, "pages": [first_page, second_page]}
+    )
+
+    assert compile_markdown(continued_document, MarkdownExportSettings()) == (
+        "<!-- original-page: 1 -->\n\n"
+        "The first half <!-- original-page: 2; continues-from: p0001-b0001 --> "
+        "the second half.\n"
+    )
+
+
+def test_compiler_keeps_table_anchor_between_surrounding_paragraphs() -> None:
+    base = document()
+    before = block(1, BlockType.BODY, "Before the table.")
+    table = TranslatedBlock(
+        block_id="p0001-b0002",
+        original_page_number=1,
+        order=2,
+        type=BlockType.TABLE,
+        segment_handling=SegmentHandling.TABLE_RECONSTRUCTION,
+        source_text=None,
+        translated_text="| A | B |\n| --- | --- |\n| 1 | 2 |",
+        manual_insertion_reason=ManualInsertionReason.TABLE,
+        continuation=SegmentContinuation.COMPLETE,
+    )
+    after = block(3, BlockType.BODY, "After the table.")
+    metadata = TableReconstructionMetadata(
+        input_fingerprint=HASH,
+        block_ids=[table.block_id],
+        provider=ProviderMetadata(
+            provider="fake",
+            model="fake-v1",
+            prompt_version="reconstruct-tables-v1",
+        ),
+        reconstructed_at=FIXED_TIME,
+    )
+    page = base.pages[0].model_copy(
+        update={"blocks": [before, table, after], "table_reconstruction": metadata}
+    )
+    anchored = compile_markdown(
+        base.model_copy(update={"pages": [page]}),
+        MarkdownExportSettings(include_page_comments=False),
+    )
+
+    assert anchored.index("Before the table.") < anchored.index("table-placement: [H!]")
+    assert anchored.index("table-placement: [H!]") < anchored.index("After the table.")
 
 
 def test_compiler_labels_footnote_marker_and_continuation() -> None:

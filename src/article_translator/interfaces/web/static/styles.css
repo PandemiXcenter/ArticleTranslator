@@ -957,6 +957,18 @@ progress::-moz-progress-bar {
   border-left: 3px solid var(--accent);
 }
 
+.continued-paragraph-block {
+  padding-left: 0.75rem;
+  border-left: 3px solid var(--focus);
+}
+
+.block-meta .paragraph-continuation {
+  color: var(--focus);
+  font-weight: 760;
+  letter-spacing: 0.03em;
+  text-transform: none;
+}
+
 .manual-insertion-block {
   padding: 0.8rem;
   border: 1px dashed var(--line-dark);
@@ -1134,6 +1146,68 @@ mark.uncertainty-mark:focus-visible {
   font-family: Georgia, "Times New Roman", serif;
   font-size: 1.8rem;
   font-weight: 500;
+}
+
+.dialog-introduction {
+  margin: -0.8rem 0 1.25rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.uncertainty-list-dialog {
+  width: min(720px, calc(100vw - 2rem));
+}
+
+.uncertainty-group-list {
+  display: grid;
+  max-height: min(560px, calc(100vh - 13rem));
+  border-top: 1px solid var(--line);
+  overflow-y: auto;
+}
+
+.uncertainty-group-item {
+  display: grid;
+  gap: 0.42rem;
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.uncertainty-group-heading {
+  display: flex;
+  gap: 1rem;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.uncertainty-group-heading h3 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.12rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.uncertainty-count {
+  flex: none;
+  padding: 0.2rem 0.42rem;
+  color: #493a16;
+  background: var(--amber-pale);
+  font-size: 0.66rem;
+  font-weight: 760;
+}
+
+.uncertainty-group-details,
+.uncertainty-group-reason {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.uncertainty-group-open {
+  width: fit-content;
+  margin-top: 0.1rem;
 }
 
 .dialog-close {

@@ -7,13 +7,13 @@ from importlib.resources import files
 from article_translator.domain.enums import BlockType, SegmentHandling
 from article_translator.domain.models import PageTranslation, TranslationSettings
 
-PROMPT_VERSION = "translate-page-v4"
+PROMPT_VERSION = "translate-page-v5"
 TABLE_PROMPT_VERSION = "reconstruct-tables-v1"
 
 
 @lru_cache(maxsize=1)
 def _prompt_preamble() -> str:
-    resource = files("article_translator.prompts").joinpath("translate_page_v4.md")
+    resource = files("article_translator.prompts").joinpath("translate_page_v5.md")
     return resource.read_text(encoding="utf-8").strip()
 
 
@@ -104,6 +104,7 @@ def build_table_prompt(
                 "manual_insertion_reason": block.manual_insertion_reason,
                 "footnote_marker": block.footnote_marker,
                 "continuation": block.continuation,
+                "paragraph_continuation": block.paragraph_continuation,
                 "classification_review_required": block.classification_review_required,
             }
             for block in page_translation.blocks
@@ -150,6 +151,7 @@ def _previous_page_context(
                     "manual_insertion_reason": block.manual_insertion_reason,
                     "footnote_marker": block.footnote_marker,
                     "continuation": block.continuation,
+                    "paragraph_continuation": block.paragraph_continuation,
                 }
                 for block in page.blocks
             ],

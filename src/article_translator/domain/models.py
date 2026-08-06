@@ -27,6 +27,7 @@ SCHEMA_VERSION: Literal["4.0"] = "4.0"
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 TranslationRunId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
+BlockId = Annotated[str, StringConstraints(pattern=r"^p\d{4,}-b\d{4,}$")]
 ProviderSetting = str | int | float | bool
 
 
@@ -146,8 +147,17 @@ class GeneratedTextBlock(ContractModel):
     source_text: NonEmptyText
     translated_text: NonEmptyText
     heading_level: int | None = Field(default=None, ge=1, le=6)
+    paragraph_continuation: SegmentContinuation | None
     uncertainties: list[UncertainTerm] = Field(default_factory=list)
     classification_review_required: bool = False
+
+    @model_validator(mode="after")
+    def paragraph_continuation_applies_only_to_body_text(self) -> Self:
+        if self.type is BlockType.BODY and self.paragraph_continuation is None:
+            raise ValueError("body blocks must state their paragraph continuation")
+        if self.type is not BlockType.BODY and self.paragraph_continuation is not None:
+            raise ValueError("paragraph continuation is valid only for body blocks")
+        return self
 
 
 class GeneratedFootnoteBlock(ContractModel):
@@ -206,6 +216,44 @@ class GeneratedPagePayload(ContractModel):
         expected = list(range(1, len(orders) + 1))
         if orders != expected:
             raise ValueError(f"block order must be contiguous and ordered; expected {expected}")
+        body_blocks = [block for block in self.blocks if block.type is BlockType.BODY]
+        incoming = [
+            block
+            for block in body_blocks
+            if isinstance(block, GeneratedTextBlock)
+            and _continues_from_previous(block.paragraph_continuation)
+        ]
+        outgoing = [
+            block
+            for block in body_blocks
+            if isinstance(block, GeneratedTextBlock)
+            and _continues_to_next(block.paragraph_continuation)
+        ]
+        if incoming and incoming != body_blocks[:1]:
+            raise ValueError("only the first body block may continue a previous-page paragraph")
+        if outgoing and outgoing != body_blocks[-1:]:
+            raise ValueError("only the last body block may continue onto the next page")
+        incoming_flow_blocks = [
+            block
+            for block in self.blocks
+            if block.type
+            not in {
+                BlockType.HEADER,
+                BlockType.FOOTER,
+                BlockType.PAGE_NUMBER,
+            }
+        ]
+        outgoing_flow_blocks = [
+            block for block in incoming_flow_blocks if block.type is not BlockType.FOOTNOTE
+        ]
+        if incoming and incoming_flow_blocks[:1] != incoming:
+            raise ValueError(
+                "a previous-page paragraph continuation must be the first main-flow block"
+            )
+        if outgoing and outgoing_flow_blocks[-1:] != outgoing:
+            raise ValueError(
+                "an unfinished paragraph must be the final main-flow block on its page"
+            )
         return self
 
 
@@ -294,7 +342,7 @@ class TableReconstructionMetadata(ContractModel):
 class TranslatedBlock(ContractModel):
     """Validated model output enriched with pipeline-owned identity."""
 
-    block_id: Annotated[str, StringConstraints(pattern=r"^p\d{4,}-b\d{4,}$")]
+    block_id: BlockId
     original_page_number: int = Field(ge=1)
     order: int = Field(ge=1)
     type: BlockType
@@ -306,6 +354,8 @@ class TranslatedBlock(ContractModel):
     manual_insertion_reason: ManualInsertionReason | None = None
     footnote_marker: str | None = None
     continuation: SegmentContinuation | None = None
+    paragraph_continuation: SegmentContinuation | None = None
+    continues_from_block_id: BlockId | None = None
     classification_review_required: bool = False
     legacy_translated_table: bool = False
     legacy_manual_table: bool = False
@@ -345,6 +395,8 @@ def _validate_segment_contract(block: TranslatedBlock) -> None:
             raise ValueError("manual insertion blocks cannot contain a footnote marker")
         if block.continuation is None:
             raise ValueError("manual insertion blocks must state their continuation relationship")
+        if block.paragraph_continuation is not None or block.continues_from_block_id is not None:
+            raise ValueError("manual insertion blocks cannot contain paragraph continuity")
         return
 
     if block.segment_handling is SegmentHandling.TABLE_RECONSTRUCTION:
@@ -363,6 +415,8 @@ def _validate_segment_contract(block: TranslatedBlock) -> None:
             raise ValueError("reconstructed tables cannot contain heading or footnote metadata")
         if block.legacy_translated_table or block.legacy_manual_table:
             raise ValueError("reconstructed tables cannot use legacy compatibility markers")
+        if block.paragraph_continuation is not None or block.continues_from_block_id is not None:
+            raise ValueError("reconstructed tables cannot contain paragraph continuity")
         return
 
     if block.manual_insertion_reason is not None:
@@ -381,6 +435,28 @@ def _validate_segment_contract(block: TranslatedBlock) -> None:
         block.footnote_marker is not None or block.continuation is not None
     ):
         raise ValueError("footnote metadata is valid only for footnote blocks")
+    if block.type is BlockType.BODY:
+        if _continues_from_previous(block.paragraph_continuation):
+            if block.continues_from_block_id is None:
+                raise ValueError("incoming paragraph continuations must link a previous block")
+        elif block.continues_from_block_id is not None:
+            raise ValueError("only incoming paragraph continuations may link a previous block")
+    elif block.paragraph_continuation is not None or block.continues_from_block_id is not None:
+        raise ValueError("paragraph continuity is valid only for body blocks")
+
+
+def _continues_from_previous(value: SegmentContinuation | None) -> bool:
+    return value in {
+        SegmentContinuation.FROM_PREVIOUS_PAGE,
+        SegmentContinuation.FROM_PREVIOUS_AND_TO_NEXT_PAGE,
+    }
+
+
+def _continues_to_next(value: SegmentContinuation | None) -> bool:
+    return value in {
+        SegmentContinuation.TO_NEXT_PAGE,
+        SegmentContinuation.FROM_PREVIOUS_AND_TO_NEXT_PAGE,
+    }
 
 
 def _validate_manual_reason(
@@ -420,6 +496,38 @@ class PageTranslation(ContractModel):
             raise ValueError("translated blocks must be in contiguous reading order")
         if any(block.original_page_number != self.original_page_number for block in self.blocks):
             raise ValueError("every block must belong to its containing page")
+        body_blocks = [block for block in self.blocks if block.type is BlockType.BODY]
+        incoming = [
+            block for block in body_blocks if _continues_from_previous(block.paragraph_continuation)
+        ]
+        outgoing = [
+            block for block in body_blocks if _continues_to_next(block.paragraph_continuation)
+        ]
+        if incoming and incoming != body_blocks[:1]:
+            raise ValueError("only the first body block may continue a previous-page paragraph")
+        if outgoing and outgoing != body_blocks[-1:]:
+            raise ValueError("only the last body block may continue onto the next page")
+        incoming_flow_blocks = [
+            block
+            for block in self.blocks
+            if block.type
+            not in {
+                BlockType.HEADER,
+                BlockType.FOOTER,
+                BlockType.PAGE_NUMBER,
+            }
+        ]
+        outgoing_flow_blocks = [
+            block for block in incoming_flow_blocks if block.type is not BlockType.FOOTNOTE
+        ]
+        if incoming and incoming_flow_blocks[:1] != incoming:
+            raise ValueError(
+                "a previous-page paragraph continuation must be the first main-flow block"
+            )
+        if outgoing and outgoing_flow_blocks[-1:] != outgoing:
+            raise ValueError(
+                "an unfinished paragraph must be the final main-flow block on its page"
+            )
         reconstructed_ids = [
             block.block_id
             for block in self.blocks
@@ -519,4 +627,28 @@ class DocumentTranslation(ContractModel):
         ]
         if unresolved_tables:
             raise ValueError("document contains tables awaiting reconstruction")
+        blocks_by_id = {block.block_id: block for page in self.pages for block in page.blocks}
+        for page in self.pages:
+            for block in page.blocks:
+                if block.continues_from_block_id is None:
+                    continue
+                previous = blocks_by_id.get(block.continues_from_block_id)
+                if previous is None:
+                    raise ValueError("paragraph continuation links an unknown block")
+                if (
+                    previous.type is not BlockType.BODY
+                    or previous.original_page_number != block.original_page_number - 1
+                ):
+                    raise ValueError(
+                        "paragraph continuation must link a body block on the previous page"
+                    )
+                previous_bodies = [
+                    candidate
+                    for candidate in self.pages[block.original_page_number - 2].blocks
+                    if candidate.type is BlockType.BODY
+                ]
+                if not previous_bodies or previous_bodies[-1].block_id != previous.block_id:
+                    raise ValueError(
+                        "paragraph continuation must link the previous page's final body block"
+                    )
         return self

@@ -52,7 +52,10 @@ structural only; it must not invent or change facts, names, values, dates, units
 categories, totals, or rows. A reconstructed table has
 `segment_handling="table_reconstruction"`, machine GFM Markdown in
 `translated_text`, and no claimed `source_text`. Figures remain text-free manual
-insertions for a reviewer.
+insertions for a reviewer. Markdown export keeps every table between the exact
+surrounding blocks selected by first-pass reading order and prefixes it with an
+invisible `table-placement: [H!]` anchor containing its physical page and block
+identity. The table remains ordinary inline GFM rather than a floating object.
 
 Footnotes are classified by function, not by font size, position, or share of the
 page. A note may be a short marked passage below a rule, an unmarked continuation,
@@ -71,10 +74,17 @@ images, editorial revisions, provider metadata, IDs, hashes, tokens, or
 timestamps. It is delimited as untrusted, read-only context, and the model must
 return only current-page content.
 
-This can resolve a word, sentence, heading, footnote, or table continuation that
-enters the current page. It cannot retroactively change an already finalized
-previous page. The main contract is versioned as `translate-page-v4`; the table
-contract is `reconstruct-tables-v1`.
+For body text, the primary model must populate a `paragraph_continuation` state.
+On the next physical page it uses the prior projection to decide whether the
+first body block continues the preceding page's final body block. A confirmed
+continuation receives a pipeline-owned `continues_from_block_id` link. Canonical
+blocks remain page-local and independently revisable, while Markdown export joins
+the linked fragments into one paragraph and places the new physical-page comment
+inline at the join. This cannot retroactively rewrite the preceding fragment.
+
+The same context can resolve a word, sentence, heading, footnote, or table
+continuation that enters the current page. The main contract is versioned as
+`translate-page-v5`; the table contract is `reconstruct-tables-v1`.
 
 ## Quick start: local interface
 
@@ -114,8 +124,10 @@ loopback host or port. The interface is organized as an internal workbench:
   page visited is stored per run, so the catalog can offer **Continue from page
   X**. Edits create append-only revisions without changing machine output.
   Uncertain terms are visibly marked and can be corrected once or, when multiple
-  unresolved model-annotated occurrences exist, all at once. The reviewed
-  document can be downloaded as Markdown.
+  unresolved model-annotated occurrences exist, all at once. **Uncertain terms**
+  opens a complete unresolved list ordered from most to least occurrences and
+  can jump to the first marked instance. The reviewed document can be downloaded
+  as Markdown.
 
 For each request, the configured provider receives one current-page image and
 that page's complete extracted Markdown. A table-bearing page therefore makes a
@@ -385,8 +397,9 @@ The live Gemini path has not been verified by the automated suite.
 ## Current limitations
 
 - Translation is sequential. Only finalized preceding same-run page translations
-  are available as context; no following-page image/text is sent, and context
-  cannot retroactively repair a previous page's trailing fragment.
+  are available as context; no following-page image/text is sent. The next page
+  can confirm and link a paragraph continuation, but it cannot rewrite the
+  preceding page's already persisted fragment.
 - Block boundaries and types are model decisions and may vary between runs.
 - Reconstructed tables are model-produced modern GFM structures, not claimed
   cell-for-cell source transcriptions, and still require editorial review.

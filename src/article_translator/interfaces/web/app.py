@@ -5,7 +5,7 @@ import secrets
 import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from importlib.resources import files
 from pathlib import Path
 from typing import Annotated
@@ -538,6 +538,7 @@ def _review_payload(review: ReviewDocument) -> dict[str, object]:
         "translation_run_id": review.translation_run_id,
         "source_file_name": review.source_file_name,
         "page_count": review.page_count,
+        "uncertainty_groups": _uncertainty_group_payload(review),
         "pages": [
             {
                 "original_page_number": page.original_page_number,
@@ -562,6 +563,12 @@ def _review_payload(review: ReviewDocument) -> dict[str, object]:
                         "continuation": (
                             block.continuation.value if block.continuation is not None else None
                         ),
+                        "paragraph_continuation": (
+                            block.paragraph_continuation.value
+                            if block.paragraph_continuation is not None
+                            else None
+                        ),
+                        "continues_from_block_id": block.continues_from_block_id,
                         "classification_review_required": (block.classification_review_required),
                         "base_revision": block.latest_revision_number,
                         "review_status": block.review_status.value,
@@ -582,6 +589,68 @@ def _review_payload(review: ReviewDocument) -> dict[str, object]:
             for page in review.pages
         ],
     }
+
+
+@dataclass(slots=True)
+class _UncertaintyGroup:
+    term_group_id: str
+    source_term: str
+    proposed_translation: str | None
+    reason: str
+    alternatives: list[str]
+    occurrence_count: int = 0
+    page_numbers: set[int] = field(default_factory=set)
+    uncertainty_ids: list[str] = field(default_factory=list)
+
+
+def _uncertainty_group_payload(review: ReviewDocument) -> list[dict[str, object]]:
+    groups: dict[str, _UncertaintyGroup] = {}
+    for page in review.pages:
+        for block in page.blocks:
+            uncertainties: list[UncertaintyHighlight | UncertaintyFallback] = [
+                *block.uncertainty_highlights,
+                *block.uncertainty_fallbacks,
+            ]
+            for uncertainty in uncertainties:
+                group = groups.setdefault(
+                    uncertainty.term_group_id,
+                    _UncertaintyGroup(
+                        term_group_id=uncertainty.term_group_id,
+                        source_term=uncertainty.source_term,
+                        proposed_translation=uncertainty.proposed_translation,
+                        reason=uncertainty.reason,
+                        alternatives=list(uncertainty.alternatives),
+                    ),
+                )
+                group.occurrence_count += 1
+                group.page_numbers.add(page.original_page_number)
+                group.uncertainty_ids.append(uncertainty.uncertainty_id)
+                for alternative in uncertainty.alternatives:
+                    if alternative not in group.alternatives:
+                        group.alternatives.append(alternative)
+
+    ordered = sorted(
+        groups.values(),
+        key=lambda group: (
+            -group.occurrence_count,
+            group.source_term.casefold(),
+            (group.proposed_translation or "").casefold(),
+            group.term_group_id,
+        ),
+    )
+    return [
+        {
+            "term_group_id": group.term_group_id,
+            "source_term": group.source_term,
+            "proposed_translation": group.proposed_translation,
+            "reason": group.reason,
+            "alternatives": group.alternatives,
+            "occurrence_count": group.occurrence_count,
+            "page_numbers": sorted(group.page_numbers),
+            "first_uncertainty_id": group.uncertainty_ids[0],
+        }
+        for group in ordered
+    ]
 
 
 def _default_continue_page(review: ReviewDocument) -> int:

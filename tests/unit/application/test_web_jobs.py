@@ -20,7 +20,12 @@ from article_translator.application.web_jobs import (
 )
 from article_translator.config import ProjectConfig, load_project_config
 from article_translator.domain.editorial import ReviewPosition
-from article_translator.domain.enums import BlockType, ExtractionStatus, ReviewStatus
+from article_translator.domain.enums import (
+    BlockType,
+    ExtractionStatus,
+    ReviewStatus,
+    SegmentContinuation,
+)
 from article_translator.domain.models import (
     ArtifactRef,
     DocumentTranslation,
@@ -130,6 +135,7 @@ class RecordingTranslator:
                         type=BlockType.BODY,
                         source_text=request.markdown,
                         translated_text="Source text",
+                        paragraph_continuation=SegmentContinuation.COMPLETE,
                     )
                 ]
             )

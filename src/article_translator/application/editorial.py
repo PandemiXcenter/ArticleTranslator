@@ -345,6 +345,8 @@ class EditorialService:
                         manual_insertion_reason=block.manual_insertion_reason,
                         footnote_marker=block.footnote_marker,
                         continuation=block.continuation,
+                        paragraph_continuation=block.paragraph_continuation,
+                        continues_from_block_id=block.continues_from_block_id,
                         classification_review_required=block.classification_review_required,
                         latest_revision_number=revision_number,
                         review_status=status,

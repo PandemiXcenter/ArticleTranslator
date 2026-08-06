@@ -174,6 +174,18 @@ def test_review_revision_replace_all_and_export_contract(tmp_path: Path) -> None
     assert all(item["can_replace_all"] for item in uncertainties)
     assert all(item["matching_occurrence_count"] == 2 for item in uncertainties)
     assert len({item["term_group_id"] for item in uncertainties}) == 1
+    assert initial.json()["uncertainty_groups"] == [
+        {
+            "term_group_id": uncertainties[0]["term_group_id"],
+            "source_term": "gammel",
+            "proposed_translation": "olde",
+            "reason": "Archaic usage",
+            "alternatives": ["old"],
+            "occurrence_count": 2,
+            "page_numbers": [1],
+            "first_uncertainty_id": uncertainties[0]["uncertainty_id"],
+        }
+    ]
 
     assert revised.status_code == 200
     revised_block = revised.json()["pages"][0]["blocks"][0]
@@ -186,6 +198,7 @@ def test_review_revision_replace_all_and_export_contract(tmp_path: Path) -> None
     assert replaced_block["effective_text"] == "old and old"
     assert replaced_block["base_revision"] == 2
     assert replaced_block["uncertainties"] == []
+    assert replaced.json()["uncertainty_groups"] == []
     assert exported.status_code == 200
     assert "old and old" in exported.text
     assert "olde and olde" not in exported.text
@@ -347,6 +360,8 @@ def test_manual_insertion_metadata_and_revision_flow_through_review_api(
         "manual_insertion_reason": "table_like",
         "footnote_marker": None,
         "continuation": "to_next_page",
+        "paragraph_continuation": None,
+        "continues_from_block_id": None,
         "classification_review_required": True,
         "base_revision": 0,
         "review_status": "unreviewed",
@@ -358,3 +373,47 @@ def test_manual_insertion_metadata_and_revision_flow_through_review_api(
     assert revised_block["review_status"] == "accepted"
     assert reviewer_table in exported.text
     assert "Manual insertion required" not in exported.text
+
+
+def test_review_uncertainty_groups_are_sorted_by_duplicate_count(tmp_path: Path) -> None:
+    block = TranslatedBlock(
+        block_id=BLOCK_ID,
+        original_page_number=1,
+        order=1,
+        type=BlockType.BODY,
+        source_text="gammel gammel sjælden",
+        translated_text="olde olde rare",
+        uncertainties=[
+            UncertainTerm(
+                source_term="sjælden",
+                proposed_translation="rare",
+                reason="Context is damaged",
+            ),
+            UncertainTerm(
+                source_term="gammel",
+                proposed_translation="olde",
+                reason="Archaic usage",
+            ),
+        ],
+    )
+    job_dir = tmp_path / "job"
+    FilesystemArtifactRepository(job_dir).write_document(
+        RUN_ID,
+        _document(translated_block=block),
+    )
+    config = load_project_config(Path("config/default.toml"))
+    config = config.model_copy(
+        update={"paths": config.paths.model_copy(update={"artifacts_dir": tmp_path / "artifacts"})}
+    )
+    app = create_app(
+        config,
+        job_manager=cast(WebJobManager, ReadyJobManager(job_dir)),
+        secret_store=DotenvSecretStore(tmp_path / ".env"),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/jobs/{'b' * 32}/review")
+
+    groups = response.json()["uncertainty_groups"]
+    assert [group["source_term"] for group in groups] == ["gammel", "sjælden"]
+    assert [group["occurrence_count"] for group in groups] == [2, 1]

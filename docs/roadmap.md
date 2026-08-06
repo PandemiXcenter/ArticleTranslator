@@ -55,6 +55,11 @@ Implemented:
   of exact cell-level `source_text`; figures remain manual insertions;
 - functional footnote classification with optional markers and explicit
   continuation metadata for short, full-page, and cross-page notes;
+- required body-paragraph continuation state, next-page confirmation, and
+  pipeline-owned links to the preceding page's final body block;
+- one-paragraph Markdown projection for confirmed cross-page fragments while
+  retaining page-local canonical blocks and append-only revisions;
+- exact ordered table emission with an invisible `[H!]` placement anchor;
 - TOML-configured context from 0–10 finalized preceding same-run machine page
   translations (default 2), shared by primary and table prompts and constrained
   to current-page-only output;
@@ -153,6 +158,8 @@ Implemented:
   tables), reviewed-unchanged blocks, and manually edited revisions;
 - visible qualitative uncertainty details and conditional Translate One /
   Translate All correction;
+- an Uncertain terms list grouped and ordered by unresolved occurrence count,
+  with page locations and first-occurrence navigation;
 - reviewed Markdown download.
 
 Deferred:
