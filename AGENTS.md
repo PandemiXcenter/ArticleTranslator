@@ -90,6 +90,10 @@ src/article_translator/cli.py
     Command inputs plus `serve` and the zero-argument `uv run app` entry points.
     No pipeline/business rules.
 
+src/article_translator/build_executable.py, executable.py, runtime.py
+    Native PyInstaller build orchestration, frozen entry dispatch, and persistent
+    per-user runtime paths. No pipeline/business rules.
+
 tests/unit/
     Pure domain/application/config and mocked-adapter behavior.
 
@@ -387,6 +391,25 @@ library when adequate.
   a durable queue. Auto continue must remain bounded by TOML and run inline so a
   single-worker executor cannot deadlock by waiting on its own queue.
 - Add concurrency/history tests before multi-editor behavior.
+
+### Native executable packaging
+
+- Use only the uv-managed PyInstaller development dependency.
+- Preserve one console-capable executable so no arguments launch the workbench
+  and CLI arguments retain the complete backend workflow.
+- Reject cross-compilation. Build Windows on Windows, macOS on macOS, and Linux
+  on Linux; use the oldest intended Linux baseline.
+- Bundle the checked-in default TOML, package data, prompts, static web assets,
+  MarkItDown/Magika data, and PDFium binaries. Never bundle `.env`, source PDFs,
+  generated artifacts, or provider responses.
+- `uv run compile --<platform> --clean` may remove only that platform's ignored
+  `build/pyinstaller/` and `dist/` subdirectories. It must preserve local secrets,
+  personal TOML, artifacts, and editorial metadata.
+- Keep frozen config, `.env`, and artifacts in the native per-user application
+  data directory, never PyInstaller's temporary extraction directory.
+- Keep XeLaTeX external and document that reviewed PDF export requires it.
+- Unit-test platform validation, PyInstaller arguments, frozen path materialization,
+  and zero-argument/CLI dispatch. Smoke-test the native artifact without Gemini.
 
 For a web change, inspect `interfaces/web/app.py`, its strict schemas and static
 assets, `application/web_jobs.py`, `application/editorial.py`, and the matching

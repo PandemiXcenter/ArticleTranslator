@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 import article_translator.cli as cli
 import article_translator.composition as composition
+import article_translator.executable as executable
 from article_translator.application.pipeline import TranslationPipeline
 from article_translator.config import ProjectConfig, load_project_config
 from article_translator.domain.models import (
@@ -209,3 +210,88 @@ def test_short_app_launcher_falls_back_to_checked_in_config(
     cli.launch_app()
 
     assert loaded == [Path("config/default.toml")]
+
+
+def test_frozen_entry_launches_workbench_without_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launched: list[bool] = []
+    monkeypatch.setattr(cli, "launch_app", lambda: launched.append(True))
+    monkeypatch.setattr(executable.sys, "argv", ["ArticleTranslator"])
+
+    executable.main()
+
+    assert launched == [True]
+
+
+def test_frozen_entry_retains_complete_cli_with_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invocations: list[str] = []
+    monkeypatch.setattr(cli, "app", lambda *, prog_name: invocations.append(prog_name))
+    monkeypatch.setattr(executable.sys, "argv", ["ArticleTranslator", "--help"])
+
+    executable.main()
+
+    assert invocations == ["ArticleTranslator"]
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("127.0.0.1", "http://127.0.0.1:8000"),
+        ("localhost", "http://localhost:8000"),
+        ("::1", "http://[::1]:8000"),
+    ],
+)
+def test_local_web_url_formats_loopback_hosts(host: str, expected: str) -> None:
+    assert cli._local_web_url(host, 8000) == expected
+
+
+def test_browser_opens_only_after_server_is_ready() -> None:
+    server = SimpleNamespace(started=True, should_exit=False)
+    opened: list[str] = []
+
+    def open_browser(url: str) -> bool:
+        opened.append(url)
+        return True
+
+    cli._open_browser_when_started(
+        server,
+        "http://127.0.0.1:8000",
+        open_browser,
+        poll_interval_seconds=0,
+    )
+
+    assert opened == ["http://127.0.0.1:8000"]
+
+
+def test_browser_does_not_open_when_server_exits_during_startup() -> None:
+    server = SimpleNamespace(started=False, should_exit=True)
+    opened: list[str] = []
+
+    def open_browser(url: str) -> bool:
+        opened.append(url)
+        return True
+
+    cli._open_browser_when_started(
+        server,
+        "http://127.0.0.1:8000",
+        open_browser,
+        poll_interval_seconds=0,
+    )
+
+    assert opened == []
+
+
+def test_browser_launch_failure_does_not_escape(capsys: pytest.CaptureFixture[str]) -> None:
+    server = SimpleNamespace(started=True, should_exit=False)
+
+    cli._open_browser_when_started(
+        server,
+        "http://127.0.0.1:8000",
+        lambda _: False,
+        poll_interval_seconds=0,
+    )
+
+    assert "Open http://127.0.0.1:8000 manually" in capsys.readouterr().err

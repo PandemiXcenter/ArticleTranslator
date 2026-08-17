@@ -182,7 +182,9 @@ Implemented:
 - conditional Review/Read actions based on accepted-block progress;
 - export menus for reviewed XeLaTeX source, Markdown, plain text, and locally
   typeset XeLaTeX PDF;
-- section-type correction and footnote owner/marker controls.
+- section-type correction and footnote owner/marker controls;
+- native uv-managed PyInstaller builds for Windows, macOS, and Linux, producing
+  one executable that launches the workbench or delegates to the complete CLI.
 
 Deferred:
 

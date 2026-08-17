@@ -33,6 +33,7 @@ def test_default_toml_is_the_complete_non_secret_configuration() -> None:
     assert config.pdf_export.compile_timeout_seconds == 120
     assert config.paths.artifacts_dir == Path("artifacts").resolve()
     assert config.web.host == "127.0.0.1"
+    assert config.web.open_browser_on_start is True
     assert config.web.max_concurrent_jobs == 1
     assert config.web.max_pdf_pages == 500
     assert config.web.auto_continue_default is False
@@ -243,6 +244,18 @@ def test_web_server_rejects_non_loopback_host(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ConfigurationError, match=r"web\.host"):
+        load_project_config(path)
+
+
+def test_browser_startup_setting_is_required(tmp_path: Path) -> None:
+    source = Path("config/default.toml").read_text(encoding="utf-8")
+    path = tmp_path / "missing-browser-startup.toml"
+    path.write_text(
+        source.replace("open_browser_on_start = true\n", ""),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="open_browser_on_start"):
         load_project_config(path)
 
 

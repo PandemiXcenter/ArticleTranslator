@@ -120,8 +120,12 @@ exists and otherwise uses the complete checked-in `config/default.toml`:
 uv run app
 ```
 
-Open `http://127.0.0.1:8000` unless the selected TOML file configures another
-loopback host or port. The interface is organized as an internal workbench:
+The launcher opens the interface in the default browser after the local server is
+ready. If desktop browser integration is unavailable, open
+`http://127.0.0.1:8000` manually unless the selected TOML file configures another
+loopback host or port. Set `web.open_browser_on_start = false` in the selected
+TOML file to disable automatic opening. The interface is organized as an internal
+workbench:
 
 - **Translate** selects a laptop PDF and shows the complete per-job choices before
   submission: input/output languages, Gemini model, translation style, finalized
@@ -187,6 +191,36 @@ server is stopped. **Cancel** dismisses an already stopped run; it is not active
 task interruption. This is filesystem discovery, not a database or durable task
 queue. There is no authentication or remote deployment support, so do not expose
 the server on a network.
+
+## Native executable
+
+Build a native single-file program with the uv-managed PyInstaller dependency:
+
+```bash
+uv run compile --windows
+uv run compile --mac
+uv run compile --linux
+```
+
+Add `--clean` for a cache-free distributable build using only the checked-in
+default configuration, for example `uv run compile --mac --clean`. Neither clean
+nor ordinary builds include `.env`, personal TOML, artifacts, or saved review
+metadata. The recipient's executable still persists their own settings, key,
+jobs, and editorial metadata in their per-user application-data directory.
+
+Run the command on the operating system named by the flag; PyInstaller does not
+cross-compile. The result is written below `dist/<platform>/`. With no arguments,
+the executable starts and opens the same local interface as `uv run app`; with
+arguments it exposes the complete existing CLI, including `run`, `ingest`, `translate`, the
+document `compile` subcommand, and `serve`.
+
+The executable bundles the application, Python runtime, UI and prompt resources,
+MarkItDown, and PDFium. It keeps config, artifacts, and the optional saved Gemini
+key in the operating system's per-user application-data directory rather than
+PyInstaller's temporary extraction directory. XeLaTeX remains an external
+workstation requirement for reviewed PDF export. See
+[`docs/packaging.md`](docs/packaging.md) for output paths, native-build constraints,
+runtime directories, and verification guidance.
 
 ## CLI workflow
 

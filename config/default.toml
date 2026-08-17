@@ -64,6 +64,8 @@ compile_timeout_seconds = 120
 # The editor is intentionally local-only until authentication is added.
 host = "127.0.0.1"
 port = 8000
+# Open the workbench in the default browser after the local server is ready.
+open_browser_on_start = true
 max_upload_bytes = 100000000
 max_concurrent_jobs = 1
 max_pdf_pages = 500

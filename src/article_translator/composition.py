@@ -13,6 +13,7 @@ from article_translator.application.pipeline import TranslationPipeline
 from article_translator.config import ProjectConfig, SecretSettings
 from article_translator.domain.models import DocumentTranslation
 from article_translator.ports.translation import PageTranslator
+from article_translator.runtime import default_secret_path
 
 
 def build_pipeline() -> TranslationPipeline:
@@ -32,7 +33,7 @@ def gemini_translator(
 ) -> Iterator[PageTranslator]:
     """Build one configured Gemini adapter without leaking its secret."""
 
-    secret = api_key or SecretSettings().gemini_api_key
+    secret = api_key or SecretSettings(_env_file=default_secret_path()).gemini_api_key
     if secret is None:
         raise ValueError("GEMINI_API_KEY is required in the environment or an ignored .env file")
     gemini = config.provider.gemini

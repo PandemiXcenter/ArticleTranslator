@@ -54,6 +54,7 @@ from article_translator.interfaces.web.schemas import (
     UncertaintyReplacementRequest,
 )
 from article_translator.ports.export import PdfCompiler
+from article_translator.runtime import default_secret_path
 
 
 def _asset(name: str) -> str:
@@ -83,7 +84,7 @@ def create_app(
             api_key=api_key,
         ),
     )
-    local_secret_store = secret_store or DotenvSecretStore(Path(".env"))
+    local_secret_store = secret_store or DotenvSecretStore(default_secret_path())
     local_pdf_compiler = pdf_compiler or LatexPdfCompiler(
         engine=config.pdf_export.latex_engine,
         timeout_seconds=config.pdf_export.compile_timeout_seconds,

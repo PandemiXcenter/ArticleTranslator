@@ -21,6 +21,7 @@ dependencies = [
 [project.scripts]
 article-translator = "article_translator.cli:app"
 app = "article_translator.cli:launch_app"
+compile = "article_translator.build_executable:main"
 
 [build-system]
 requires = ["uv_build>=0.9.21,<0.10.0"]
@@ -30,6 +31,7 @@ build-backend = "uv_build"
 dev = [
     "httpx>=0.28.1",
     "mypy>=2.3.0",
+    "pyinstaller>=6.22.1",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.16.0",

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import time
+import webbrowser
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Never
+from threading import Thread
+from typing import Annotated, Never, Protocol
 
 import typer
 from rich.console import Console
@@ -13,6 +17,7 @@ from article_translator.composition import build_pipeline, translate_with_config
 from article_translator.config import ProjectConfig, load_project_config
 from article_translator.domain.errors import ArticleTranslatorError
 from article_translator.domain.models import DocumentTranslation
+from article_translator.runtime import runtime_paths
 
 app = typer.Typer(
     name="article-translator",
@@ -21,14 +26,20 @@ app = typer.Typer(
 )
 console = Console()
 error_console = Console(stderr=True)
-DEFAULT_CONFIG_PATH = Path("config/default.toml")
-LOCAL_CONFIG_PATH = Path("config/personal.local.toml")
+_RUNTIME_PATHS = runtime_paths()
+DEFAULT_CONFIG_PATH = _RUNTIME_PATHS.default_config
+LOCAL_CONFIG_PATH = _RUNTIME_PATHS.personal_config
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeContext:
     config_path: Path
     config: ProjectConfig
+
+
+class StartupAwareServer(Protocol):
+    started: bool
+    should_exit: bool
 
 
 @app.callback()
@@ -42,7 +53,7 @@ def configure(
             help="TOML file containing every non-secret setting.",
             dir_okay=False,
         ),
-    ] = Path("config/default.toml"),
+    ] = DEFAULT_CONFIG_PATH,
 ) -> None:
     """Load one explicit, validated configuration for the whole command."""
 
@@ -198,11 +209,55 @@ def _serve_app(config: ProjectConfig) -> None:
 
     from article_translator.interfaces.web import create_app
 
-    uvicorn.run(
-        create_app(config),
-        host=config.web.host,
-        port=config.web.port,
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_app(config),
+            host=config.web.host,
+            port=config.web.port,
+        )
     )
+    if config.web.open_browser_on_start:
+        Thread(
+            target=_open_browser_when_started,
+            args=(server, _local_web_url(config.web.host, config.web.port), _open_browser),
+            daemon=True,
+            name="article-translator-browser",
+        ).start()
+    server.run()
+
+
+def _local_web_url(host: str, port: int) -> str:
+    rendered_host = f"[{host}]" if ":" in host else host
+    return f"http://{rendered_host}:{port}"
+
+
+def _open_browser(url: str) -> bool:
+    return webbrowser.open(url, new=2)
+
+
+def _open_browser_when_started(
+    server: StartupAwareServer,
+    url: str,
+    opener: Callable[[str], bool],
+    *,
+    poll_interval_seconds: float = 0.05,
+) -> None:
+    while not server.started and not server.should_exit:
+        time.sleep(poll_interval_seconds)
+    if not server.started:
+        return
+    try:
+        opened = opener(url)
+    except Exception as exc:  # A desktop integration failure must not stop the server.
+        error_console.print(
+            f"[yellow]Could not open the default browser ({type(exc).__name__}). "
+            f"Open {url} manually.[/yellow]"
+        )
+        return
+    if not opened:
+        error_console.print(
+            f"[yellow]Could not open the default browser. Open {url} manually.[/yellow]"
+        )
 
 
 def _translate(

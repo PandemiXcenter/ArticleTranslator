@@ -68,6 +68,7 @@ class ProviderConfig(ConfigModel):
 class WebConfig(ConfigModel):
     host: Literal["127.0.0.1", "::1", "localhost"]
     port: int = Field(ge=1, le=65_535)
+    open_browser_on_start: bool
     max_upload_bytes: int = Field(ge=1_000_000, le=1_000_000_000)
     max_concurrent_jobs: int = Field(ge=1, le=4)
     max_pdf_pages: int = Field(ge=1, le=10_000)
