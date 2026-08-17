@@ -2,8 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from article_translator.domain.enums import ReviewStatus, TranslationStyle
-from article_translator.domain.models import NonEmptyText
+from article_translator.domain.enums import BlockType, ReviewStatus, TranslationStyle
+from article_translator.domain.models import BlockId, NonEmptyText
 
 
 class ApiModel(BaseModel):
@@ -20,6 +20,9 @@ class JobTranslationSettings(ApiModel):
     source_language: NonEmptyText = Field(max_length=100)
     target_language: NonEmptyText = Field(max_length=100)
     style: TranslationStyle
+    previous_page_context_count: int = Field(ge=0, le=10)
+    image_dpi: int = Field(ge=72, le=600)
+    auto_continue: bool
 
 
 class ApiKeySettingsRequest(ApiModel):
@@ -35,9 +38,26 @@ class ApiKeySettingsRequest(ApiModel):
         return SecretStr(secret.strip())
 
 
+class ContinueJobRequest(ApiModel):
+    api_key: SecretStr | None = Field(default=None, max_length=4_000)
+
+    @field_validator("api_key")
+    @classmethod
+    def api_key_must_be_single_line(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        secret = value.get_secret_value()
+        if not secret.strip() or any(character in secret for character in "\r\n\0"):
+            raise ValueError("API key must be a nonblank single-line value")
+        return SecretStr(secret.strip())
+
+
 class BlockRevisionRequest(ApiModel):
     block_id: NonEmptyText
     editorial_text: NonEmptyText
+    type: BlockType
+    footnote_owner_block_id: BlockId | None = None
+    footnote_anchor_offset: int | None = Field(default=None, ge=0)
     expected_base_revision: int = Field(ge=0)
     status: ReviewStatus
 

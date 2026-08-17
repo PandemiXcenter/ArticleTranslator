@@ -117,7 +117,7 @@ def compile_command(
         typer.Argument(help="Translated job directory."),
     ],
 ) -> None:
-    """Compile canonical document JSON into clean Markdown."""
+    """Compile canonical document JSON into XeLaTeX and Markdown projections."""
 
     runtime = _runtime(context)
     try:
@@ -127,7 +127,7 @@ def compile_command(
         )
     except ArticleTranslatorError as exc:
         _abort(exc)
-    console.print(f"Markdown written to {output}")
+    console.print(f"XeLaTeX source written to {output}")
 
 
 @app.command()
@@ -162,7 +162,7 @@ def run(
         output = pipeline.compile_document(job_dir, settings=config.export)
     except (ArticleTranslatorError, ValueError) as exc:
         _abort(exc)
-    console.print(f"Completed [bold]{len(document.pages)}[/bold] pages. Markdown: {output}")
+    console.print(f"Completed [bold]{len(document.pages)}[/bold] pages. XeLaTeX: {output}")
 
 
 @app.command(name="show-config")

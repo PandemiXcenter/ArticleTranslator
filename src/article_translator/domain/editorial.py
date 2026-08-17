@@ -25,7 +25,7 @@ from article_translator.domain.models import (
 class BlockRevision(ContractModel):
     """One append-only correction scoped to an immutable machine translation run."""
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.0", "2.0"] = "2.0"
     revision_id: NonEmptyText
     document_id: Sha256
     translation_run_id: TranslationRunId
@@ -33,6 +33,10 @@ class BlockRevision(ContractModel):
     revision_number: int = Field(ge=1)
     base_revision: int = Field(ge=0)
     editorial_text: NonEmptyText
+    effective_type: BlockType | None = None
+    footnote_owner_block_id: BlockId | None = None
+    footnote_anchor_offset: int | None = Field(default=None, ge=0)
+    footnote_owner_review_required: bool | None = None
     status: ReviewStatus = ReviewStatus.UNREVIEWED
     editor: str | None = None
     note: str | None = None
@@ -45,6 +49,31 @@ class BlockRevision(ContractModel):
             raise ValueError("revision_number must be exactly one greater than base_revision")
         if len(self.resolved_uncertainty_ids) != len(set(self.resolved_uncertainty_ids)):
             raise ValueError("resolved_uncertainty_ids must be unique")
+        if self.effective_type is None:
+            if self.schema_version == "2.0":
+                raise ValueError("schema 2.0 revisions require effective block metadata")
+            if (
+                self.footnote_owner_block_id is not None
+                or self.footnote_anchor_offset is not None
+                or self.footnote_owner_review_required is not None
+            ):
+                raise ValueError("legacy revisions cannot contain effective block metadata")
+        elif self.schema_version == "1.0":
+            raise ValueError("schema 1.0 revisions cannot contain effective block metadata")
+        elif self.effective_type is BlockType.FOOTNOTE:
+            has_owner = self.footnote_owner_block_id is not None
+            if has_owner != (self.footnote_anchor_offset is not None):
+                raise ValueError("a revised footnote owner and anchor offset belong together")
+            if self.footnote_owner_review_required is None:
+                raise ValueError("a revised footnote must state whether its owner needs review")
+            if has_owner == self.footnote_owner_review_required:
+                raise ValueError("a revised footnote must have either an owner or an owner warning")
+        elif (
+            self.footnote_owner_block_id is not None
+            or self.footnote_anchor_offset is not None
+            or self.footnote_owner_review_required not in {None, False}
+        ):
+            raise ValueError("footnote ownership metadata requires an effective footnote type")
         return self
 
 
@@ -101,6 +130,7 @@ class ReviewBlock(ContractModel):
     block_id: NonEmptyText
     original_page_number: int = Field(ge=1)
     order: int = Field(ge=1)
+    machine_type: BlockType
     type: BlockType
     segment_handling: SegmentHandling
     source_text: NonEmptyText | None
@@ -108,6 +138,9 @@ class ReviewBlock(ContractModel):
     effective_translated_text: str
     manual_insertion_reason: ManualInsertionReason | None = None
     footnote_marker: str | None = None
+    footnote_owner_block_id: BlockId | None = None
+    footnote_anchor_offset: int | None = Field(default=None, ge=0)
+    footnote_owner_review_required: bool = False
     continuation: SegmentContinuation | None = None
     paragraph_continuation: SegmentContinuation | None = None
     continues_from_block_id: BlockId | None = None
@@ -157,9 +190,21 @@ class ReviewBlock(ContractModel):
         if (
             self.segment_handling is SegmentHandling.TRANSLATE
             and self.type is not BlockType.FOOTNOTE
-            and (self.footnote_marker is not None or self.continuation is not None)
+            and (
+                self.footnote_marker is not None
+                or self.continuation is not None
+                or self.footnote_owner_block_id is not None
+                or self.footnote_anchor_offset is not None
+                or self.footnote_owner_review_required
+            )
         ):
             raise ValueError("footnote metadata is valid only for footnote review blocks")
+        if self.type is BlockType.FOOTNOTE:
+            has_owner = self.footnote_owner_block_id is not None
+            if has_owner != (self.footnote_anchor_offset is not None):
+                raise ValueError("a review footnote owner and anchor offset belong together")
+            if has_owner == self.footnote_owner_review_required:
+                raise ValueError("a review footnote must have either an owner or an owner warning")
         if self.type is not BlockType.BODY and (
             self.paragraph_continuation is not None or self.continues_from_block_id is not None
         ):

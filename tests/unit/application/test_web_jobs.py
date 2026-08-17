@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -68,6 +69,36 @@ class OnePageExtractor:
                     markdown_path,
                     "text/markdown",
                 ),
+                image=_reference(artifact_root, image_path, "image/png"),
+                extraction_status=ExtractionStatus.EXTRACTED,
+                extracted_character_count=10,
+            )
+        ]
+
+
+class RecordingDpiExtractor:
+    def __init__(self) -> None:
+        self.image_dpis: list[int] = []
+
+    def extract_pages(
+        self,
+        source_pdf: Path,
+        artifact_root: Path,
+        *,
+        image_dpi: int,
+    ) -> list[PreparedPage]:
+        del source_pdf
+        self.image_dpis.append(image_dpi)
+        page_dir = artifact_root / "pages" / "0001"
+        page_dir.mkdir(parents=True)
+        markdown_path = page_dir / "source.md"
+        image_path = page_dir / "page.png"
+        markdown_path.write_text("Kildetekst", encoding="utf-8")
+        image_path.write_bytes(f"image-dpi-{image_dpi}".encode())
+        return [
+            PreparedPage(
+                original_page_number=1,
+                markdown=_reference(artifact_root, markdown_path, "text/markdown"),
                 image=_reference(artifact_root, image_path, "image/png"),
                 extraction_status=ExtractionStatus.EXTRACTED,
                 extracted_character_count=10,
@@ -150,6 +181,37 @@ class RecordingTranslator:
         )
 
 
+class StopOnceTranslator(RecordingTranslator):
+    def __init__(self, *, fail_once_on: int) -> None:
+        super().__init__()
+        self.fail_once_on = fail_once_on
+        self.calls: list[int] = []
+        self.api_version = "v1beta"
+
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        return ProviderDescriptor(
+            provider="gemini",
+            model=self.model,
+            semantic_configuration={"api_version": self.api_version},
+        )
+
+    def translate_page(self, request: PageTranslationRequest) -> ProviderResult:
+        self.calls.append(request.original_page_number)
+        if self.fail_once_on == request.original_page_number:
+            self.fail_once_on = 0
+            raise RuntimeError("synthetic stopped page")
+        return super().translate_page(request)
+
+
+class AlwaysStopTranslator(StopOnceTranslator):
+    def translate_page(self, request: PageTranslationRequest) -> ProviderResult:
+        self.calls.append(request.original_page_number)
+        if request.original_page_number == self.fail_once_on:
+            raise RuntimeError("synthetic persistent stopped page")
+        return RecordingTranslator.translate_page(self, request)
+
+
 def _reference(root: Path, path: Path, media_type: str) -> ArtifactRef:
     return ArtifactRef(
         path=path.relative_to(root).as_posix(),
@@ -165,6 +227,180 @@ def _stage_pdf(artifacts_dir: Path, staging_id: str) -> Path:
     path = staging / "article.pdf"
     path.write_bytes(b"%PDF-fake")
     return path
+
+
+def _wait_for_status(
+    manager: WebJobManager,
+    job_id: str,
+    expected: WebJobStatus,
+) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if manager.get(job_id).status is expected:
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"Job {job_id} did not reach {expected}")
+
+
+def test_failed_web_job_survives_restart_and_continues_same_run(
+    tmp_path: Path,
+) -> None:
+    config = load_project_config(Path("config/default.toml"))
+    config = config.model_copy(
+        update={"paths": config.paths.model_copy(update={"artifacts_dir": tmp_path / "artifacts"})}
+    )
+    translator = StopOnceTranslator(fail_once_on=2)
+
+    @contextmanager
+    def translator_context(
+        runtime_config: ProjectConfig,
+        api_key: SecretStr | None,
+    ) -> Iterator[PageTranslator]:
+        assert api_key is None
+        translator.model = runtime_config.provider.gemini.model
+        translator.api_version = runtime_config.provider.gemini.api_version
+        yield translator
+
+    def pipeline_factory() -> TranslationPipeline:
+        return TranslationPipeline(
+            extractor=TwoPageExtractor(),
+            repository_factory=FilesystemArtifactRepository,
+        )
+
+    manager = WebJobManager(
+        config=config,
+        pipeline_factory=pipeline_factory,
+        repository_factory=FilesystemArtifactRepository,
+        translator_factory=translator_context,
+    )
+    submitted = manager.submit(
+        upload_path=_stage_pdf(config.paths.artifacts_dir, "stopped"),
+        display_filename="article.pdf",
+        glossary={},
+    )
+    _wait_for_status(manager, submitted.job_id, WebJobStatus.FAILED)
+    failed = manager.get(submitted.job_id)
+    assert failed.current_page == 2
+    assert failed.total_pages == 2
+    assert failed.translation_run_id is not None
+    run_id = failed.translation_run_id
+    manager.shutdown()
+
+    job_dirs = [
+        path
+        for path in config.paths.artifacts_dir.iterdir()
+        if path.is_dir() and not path.name.startswith(".")
+    ]
+    assert len(job_dirs) == 1
+    checkpoint = job_dirs[0] / "runs" / run_id / "pages" / "0001" / "translation.json"
+    assert checkpoint.is_file()
+    assert translator.calls == [1, 2]
+
+    restarted = WebJobManager(
+        config=config,
+        pipeline_factory=pipeline_factory,
+        repository_factory=FilesystemArtifactRepository,
+        translator_factory=translator_context,
+    )
+    recoverable = restarted.list_recoverable_jobs()
+    assert [snapshot.job_id for snapshot in recoverable] == [run_id]
+    assert recoverable[0].current_page == 2
+    cancelled = restarted.cancel_job(run_id)
+    assert cancelled.status is WebJobStatus.CANCELLED
+    assert checkpoint.is_file()
+
+    queued = restarted.continue_job(run_id)
+    assert queued.status is WebJobStatus.QUEUED
+    restarted.shutdown()
+    ready = restarted.get(run_id)
+    assert ready.status is WebJobStatus.READY
+    assert ready.translation_run_id == run_id
+    assert translator.calls == [1, 2, 2]
+    assert not (job_dirs[0] / "runs" / run_id / "pages" / "0002" / "failure.json").exists()
+
+
+def test_auto_continue_retries_once_and_persists_policy(tmp_path: Path) -> None:
+    config = load_project_config(Path("config/default.toml"))
+    config = config.model_copy(
+        update={"paths": config.paths.model_copy(update={"artifacts_dir": tmp_path / "artifacts"})}
+    )
+    translator = StopOnceTranslator(fail_once_on=2)
+
+    @contextmanager
+    def translator_context(
+        runtime_config: ProjectConfig,
+        api_key: SecretStr | None,
+    ) -> Iterator[PageTranslator]:
+        assert api_key is None
+        translator.model = runtime_config.provider.gemini.model
+        translator.api_version = runtime_config.provider.gemini.api_version
+        yield translator
+
+    manager = WebJobManager(
+        config=config,
+        pipeline_factory=lambda: TranslationPipeline(
+            extractor=TwoPageExtractor(),
+            repository_factory=FilesystemArtifactRepository,
+        ),
+        repository_factory=FilesystemArtifactRepository,
+        translator_factory=translator_context,
+    )
+    submitted = manager.submit(
+        upload_path=_stage_pdf(config.paths.artifacts_dir, "auto-continue"),
+        display_filename="article.pdf",
+        glossary={},
+        auto_continue=True,
+    )
+    manager.shutdown()
+
+    ready = manager.get(submitted.job_id)
+    assert ready.status is WebJobStatus.READY
+    assert translator.calls == [1, 2, 2]
+    job_dir, run_id = manager.ready_context(submitted.job_id)
+    manifest = FilesystemArtifactRepository(job_dir).read_manifest()
+    assert manifest.translation_run_id == run_id
+    assert manifest.auto_continue is True
+    assert manifest.auto_continue_attempts == 1
+
+
+def test_auto_continue_stops_after_configured_attempts(tmp_path: Path) -> None:
+    config = load_project_config(Path("config/default.toml"))
+    config = config.model_copy(
+        update={"paths": config.paths.model_copy(update={"artifacts_dir": tmp_path / "artifacts"})}
+    )
+    translator = AlwaysStopTranslator(fail_once_on=2)
+
+    @contextmanager
+    def translator_context(
+        runtime_config: ProjectConfig,
+        api_key: SecretStr | None,
+    ) -> Iterator[PageTranslator]:
+        assert api_key is None
+        translator.model = runtime_config.provider.gemini.model
+        translator.api_version = runtime_config.provider.gemini.api_version
+        yield translator
+
+    manager = WebJobManager(
+        config=config,
+        pipeline_factory=lambda: TranslationPipeline(
+            extractor=TwoPageExtractor(),
+            repository_factory=FilesystemArtifactRepository,
+        ),
+        repository_factory=FilesystemArtifactRepository,
+        translator_factory=translator_context,
+    )
+    submitted = manager.submit(
+        upload_path=_stage_pdf(config.paths.artifacts_dir, "bounded-auto-continue"),
+        display_filename="article.pdf",
+        glossary={},
+        auto_continue=True,
+    )
+    manager.shutdown()
+
+    failed = manager.get(submitted.job_id)
+    assert failed.status is WebJobStatus.FAILED
+    assert failed.current_page == 2
+    assert translator.calls == [1, 2, 2]
 
 
 def test_web_jobs_run_in_order_and_preserve_distinct_glossary_runs(
@@ -283,6 +519,7 @@ def test_web_jobs_run_in_order_and_preserve_distinct_glossary_runs(
         third_run_id,
     }
     assert all(review.job_id == review.translation_run_id for review in live_reviews)
+
     assert all(review.status is WebJobStatus.READY for review in live_reviews)
     assert all(review.accepted_blocks == 0 for review in live_reviews)
     assert all(review.total_blocks == 1 for review in live_reviews)
@@ -401,6 +638,66 @@ def test_web_jobs_run_in_order_and_preserve_distinct_glossary_runs(
     }
 
 
+def test_web_rerun_with_changed_image_dpi_automatically_renders_and_translates(
+    tmp_path: Path,
+) -> None:
+    config = load_project_config(Path("config/default.toml"))
+    config = config.model_copy(
+        update={"paths": config.paths.model_copy(update={"artifacts_dir": tmp_path / "artifacts"})}
+    )
+    rerun_config = config.model_copy(
+        update={"extraction": config.extraction.model_copy(update={"image_dpi": 225})}
+    )
+    extractor = RecordingDpiExtractor()
+    translator = RecordingTranslator()
+
+    @contextmanager
+    def translator_context(
+        runtime_config: ProjectConfig,
+        api_key: SecretStr | None,
+    ) -> Iterator[PageTranslator]:
+        del runtime_config, api_key
+        yield translator
+
+    manager = WebJobManager(
+        config=config,
+        pipeline_factory=lambda: TranslationPipeline(
+            extractor=extractor,
+            repository_factory=FilesystemArtifactRepository,
+        ),
+        repository_factory=FilesystemArtifactRepository,
+        translator_factory=translator_context,
+    )
+    first = manager.submit(
+        upload_path=_stage_pdf(config.paths.artifacts_dir, "first-dpi"),
+        display_filename="article.pdf",
+        glossary={},
+    )
+    rerun = manager.submit(
+        upload_path=_stage_pdf(config.paths.artifacts_dir, "second-dpi"),
+        display_filename="article.pdf",
+        glossary={},
+        runtime_config=rerun_config,
+    )
+    manager.shutdown()
+
+    first_ready = manager.get(first.job_id)
+    rerun_ready = manager.get(rerun.job_id)
+    assert first_ready.status is WebJobStatus.READY
+    assert rerun_ready.status is WebJobStatus.READY
+    assert first_ready.translation_run_id != rerun_ready.translation_run_id
+    assert extractor.image_dpis == [150, 225]
+    assert translator.settings_languages == [("Danish", "English"), ("Danish", "English")]
+    job_dir, rerun_id = manager.ready_context(rerun.job_id)
+    manifest = FilesystemArtifactRepository(job_dir).read_manifest()
+    assert manifest.image_dpi == 225
+    assert manifest.translation_run_id == rerun_id
+    assert manifest.translation_run_ids == [
+        first_ready.translation_run_id,
+        rerun_ready.translation_run_id,
+    ]
+
+
 def test_completed_multi_page_review_reopens_after_manager_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -515,3 +812,13 @@ def test_completed_multi_page_review_reopens_after_manager_restart(
     assert second_image.status_code == 200
     assert second_image.headers["content-type"] == "image/png"
     assert second_image.content == b"image-2"
+
+    restarted.delete_review(run_id)
+    deleted_manifest = repository.read_manifest()
+    assert deleted_manifest.translation_run_ids == []
+    assert deleted_manifest.translation_run_id is None
+    assert deleted_manifest.status.value == "prepared"
+    assert not (job_dir / "runs" / run_id).exists()
+    assert restarted.list_reviews() == []
+    with pytest.raises(WebJobNotFoundError, match="not found"):
+        restarted.ready_context(run_id)

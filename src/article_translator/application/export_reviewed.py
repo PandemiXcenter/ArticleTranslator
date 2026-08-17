@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from difflib import SequenceMatcher
 
 from article_translator.domain.enums import BlockType, ManualInsertionReason, SegmentHandling
 from article_translator.domain.models import (
@@ -16,29 +17,32 @@ def compile_text(
     settings: MarkdownExportSettings,
     *,
     editorial_overrides: Mapping[str, str] | None = None,
+    type_overrides: Mapping[str, BlockType] | None = None,
 ) -> str:
     """Project canonical blocks and effective revisions into readable plain text."""
 
     overrides = editorial_overrides or {}
+    resolved_types = type_overrides or {}
     parts: list[str] = []
     part_by_block_id: dict[str, int] = {}
     list_items: list[str] = []
     for page in document.pages:
         for block in page.blocks:
-            if not _should_include(block, settings):
+            block_type = resolved_types.get(block.block_id, block.type)
+            if not _should_include(block, settings, block_type=block_type):
                 continue
             effective_text = overrides.get(block.block_id, block.translated_text)
-            if block.type is BlockType.LIST_ITEM:
+            if block_type is BlockType.LIST_ITEM:
                 if effective_text is not None and effective_text.strip():
                     list_items.append(f"- {_plain_text(effective_text)}")
                 continue
             _flush_plain_list(parts, list_items)
-            rendered = _render_text_block(block, effective_text)
+            rendered = _render_text_block(block, effective_text, block_type=block_type)
             if not rendered:
                 continue
             target_index = (
                 part_by_block_id.get(block.continues_from_block_id)
-                if block.continues_from_block_id is not None
+                if block_type is BlockType.BODY and block.continues_from_block_id is not None
                 else None
             )
             if target_index is not None:
@@ -58,10 +62,44 @@ def compile_latex(
     settings: MarkdownExportSettings,
     *,
     editorial_overrides: Mapping[str, str] | None = None,
+    type_overrides: Mapping[str, BlockType] | None = None,
+    footnote_owner_overrides: Mapping[str, tuple[str | None, int | None, bool]] | None = None,
 ) -> str:
     """Project canonical blocks directly into safe XeLaTeX source."""
 
     overrides = editorial_overrides or {}
+    resolved_types = type_overrides or {}
+    resolved_owners = footnote_owner_overrides or {}
+    blocks = [block for page in document.pages for block in page.blocks]
+    blocks_by_id = {block.block_id: block for block in blocks}
+    effective_text_by_id = {
+        block.block_id: overrides.get(block.block_id, block.translated_text) for block in blocks
+    }
+    owned_footnotes: dict[str, list[tuple[TranslatedBlock, str, int]]] = {}
+    for footnote in blocks:
+        if resolved_types.get(footnote.block_id, footnote.type) is not BlockType.FOOTNOTE:
+            continue
+        owner_id, anchor_offset, owner_review_required = resolved_owners.get(
+            footnote.block_id,
+            (
+                footnote.footnote_owner_block_id,
+                footnote.footnote_anchor_offset,
+                footnote.footnote_owner_review_required,
+            ),
+        )
+        note_text = effective_text_by_id.get(footnote.block_id)
+        owner = blocks_by_id.get(owner_id) if owner_id is not None else None
+        owner_text = effective_text_by_id.get(owner_id) if owner_id is not None else None
+        if owner_id is None or owner_review_required:
+            continue
+        if owner is None or owner_text is None or note_text is None or anchor_offset is None:
+            continue
+        mapped_offset = _map_anchor_offset(
+            owner.translated_text or "",
+            owner_text,
+            anchor_offset,
+        )
+        owned_footnotes.setdefault(owner_id, []).append((footnote, note_text, mapped_offset))
     parts: list[str] = []
     part_by_block_id: dict[str, int] = {}
     list_items: list[str] = []
@@ -72,22 +110,34 @@ def compile_latex(
             else None
         )
         for block in page.blocks:
-            if not _should_include(block, settings):
+            block_type = resolved_types.get(block.block_id, block.type)
+            if not _should_include(block, settings, block_type=block_type):
                 continue
             effective_text = overrides.get(block.block_id, block.translated_text)
-            if block.type is BlockType.LIST_ITEM:
+            if block_type is BlockType.FOOTNOTE and any(
+                block.block_id == footnote.block_id
+                for footnotes in owned_footnotes.values()
+                for footnote, _, _ in footnotes
+            ):
+                continue
+            if block_type is BlockType.LIST_ITEM:
                 if effective_text is not None and effective_text.strip():
                     list_items.append(_latex_text(effective_text))
                 continue
             if _flush_latex_list(parts, list_items) and page_marker is not None:
                 parts.insert(len(parts) - 1, page_marker)
                 page_marker = None
-            rendered = _render_latex_block(block, effective_text)
+            rendered = _render_latex_block(
+                block,
+                effective_text,
+                block_type=block_type,
+                inline_footnotes=owned_footnotes.get(block.block_id, []),
+            )
             if not rendered:
                 continue
             target_index = (
                 part_by_block_id.get(block.continues_from_block_id)
-                if block.continues_from_block_id is not None
+                if block_type is BlockType.BODY and block.continues_from_block_id is not None
                 else None
             )
             if target_index is not None:
@@ -133,36 +183,54 @@ def compile_latex(
     )
 
 
-def _should_include(block: TranslatedBlock, settings: MarkdownExportSettings) -> bool:
-    if block.type is BlockType.HEADER:
+def _should_include(
+    block: TranslatedBlock,
+    settings: MarkdownExportSettings,
+    *,
+    block_type: BlockType | None = None,
+) -> bool:
+    resolved_type = block_type or block.type
+    if resolved_type is BlockType.HEADER:
         return settings.include_headers
-    if block.type is BlockType.FOOTER:
+    if resolved_type is BlockType.FOOTER:
         return settings.include_footers
-    if block.type is BlockType.PAGE_NUMBER:
+    if resolved_type is BlockType.PAGE_NUMBER:
         return settings.include_page_numbers
     return True
 
 
-def _render_text_block(block: TranslatedBlock, effective_text: str | None) -> str:
+def _render_text_block(
+    block: TranslatedBlock,
+    effective_text: str | None,
+    *,
+    block_type: BlockType | None = None,
+) -> str:
+    resolved_type = block_type or block.type
     if block.segment_handling is SegmentHandling.MANUAL_INSERTION:
         if effective_text is not None and effective_text.strip():
             return (
                 _plain_table(effective_text)
-                if block.type is BlockType.TABLE
+                if resolved_type is BlockType.TABLE
                 else _plain_text(effective_text)
             )
         return _manual_insertion_label(block)
     if effective_text is None or not effective_text.strip():
         return ""
-    if block.type is BlockType.TABLE:
+    if resolved_type is BlockType.TABLE:
         return _plain_table(effective_text)
-    if block.type is BlockType.FOOTNOTE:
+    if resolved_type is BlockType.FOOTNOTE:
         marker = f" {block.footnote_marker}" if block.footnote_marker else ""
         return f"Footnote{marker}: {_plain_text(effective_text)}"
     return _plain_text(effective_text)
 
 
-def _render_latex_block(block: TranslatedBlock, effective_text: str | None) -> str:
+def _render_latex_block(
+    block: TranslatedBlock,
+    effective_text: str | None,
+    *,
+    block_type: BlockType | None = None,
+    inline_footnotes: list[tuple[TranslatedBlock, str, int]] | None = None,
+) -> str:
     if block.segment_handling is SegmentHandling.MANUAL_INSERTION:
         if effective_text is not None and effective_text.strip():
             if block.type is BlockType.TABLE:
@@ -171,26 +239,80 @@ def _render_latex_block(block: TranslatedBlock, effective_text: str | None) -> s
         return _latex_quote(f"\\textbf{{{_latex_text(_manual_insertion_label(block))}}}")
     if effective_text is None or not effective_text.strip():
         return ""
-    text = _latex_text(effective_text)
-    if block.type is BlockType.TABLE:
+    resolved_type = block_type or block.type
+    text = _latex_text_with_footnotes(effective_text, inline_footnotes or [])
+    if resolved_type is BlockType.TABLE:
         return _latex_table(block, effective_text)
-    if block.type is BlockType.TITLE:
+    if resolved_type is BlockType.TITLE:
         return f"\\section*{{{text}}}"
-    if block.type in {BlockType.SUBTITLE, BlockType.HEADING}:
+    if resolved_type in {BlockType.SUBTITLE, BlockType.HEADING}:
         return f"\\subsection*{{{text}}}"
-    if block.type is BlockType.BYLINE:
+    if resolved_type is BlockType.BYLINE:
         return f"\\textit{{{text}}}\\par"
-    if block.type is BlockType.QUOTE:
+    if resolved_type is BlockType.QUOTE:
         return _latex_quote(text)
-    if block.type is BlockType.CAPTION:
+    if resolved_type is BlockType.CAPTION:
         return f"\\begin{{center}}\\small\\textit{{{text}}}\\end{{center}}"
-    if block.type is BlockType.FOOTNOTE:
+    if resolved_type is BlockType.FOOTNOTE:
         marker = f" {block.footnote_marker}" if block.footnote_marker else ""
         label = _latex_text(f"Footnote{marker}")
-        return _latex_quote(f"\\small\\textbf{{{label}:}} {text}")
-    if block.type is BlockType.EQUATION:
+        return _latex_quote(f"\\small\\textbf{{{label} (owner requires review):}} {text}")
+    if resolved_type is BlockType.EQUATION:
         return _latex_quote(f"\\ttfamily {text}")
     return f"{text}\\par"
+
+
+def _latex_text_with_footnotes(
+    value: str,
+    footnotes: list[tuple[TranslatedBlock, str, int]],
+) -> str:
+    if not footnotes:
+        return _latex_text(value)
+    parts: list[str] = []
+    cursor = 0
+    for _, note_text, offset in sorted(
+        footnotes,
+        key=lambda item: (item[2], item[0].order),
+    ):
+        bounded_offset = min(max(offset, cursor), len(value))
+        parts.append(_latex_inline_fragment(value[cursor:bounded_offset]))
+        parts.append(f"\\footnote{{{_latex_text(note_text)}}}")
+        cursor = bounded_offset
+    parts.append(_latex_inline_fragment(value[cursor:]))
+    return "".join(parts)
+
+
+def _latex_inline_fragment(value: str) -> str:
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "{": r"\{",
+        "}": r"\}",
+        "$": r"\$",
+        "&": r"\&",
+        "#": r"\#",
+        "%": r"\%",
+        "_": r"\_",
+        "^": r"\textasciicircum{}",
+        "~": r"\textasciitilde{}",
+    }
+    return "".join(replacements.get(character, character) for character in value).replace("\n", " ")
+
+
+def _map_anchor_offset(machine_text: str, effective_text: str, offset: int) -> int:
+    """Keep an inline marker aligned when surrounding owner text was edited."""
+
+    bounded = min(max(offset, 0), len(machine_text))
+    if machine_text == effective_text:
+        return min(bounded, len(effective_text))
+    matcher = SequenceMatcher(a=machine_text, b=effective_text, autojunk=False)
+    for tag, machine_start, machine_end, effective_start, effective_end in matcher.get_opcodes():
+        if machine_start <= bounded <= machine_end:
+            if tag == "equal":
+                return effective_start + min(
+                    bounded - machine_start, effective_end - effective_start
+                )
+            return effective_end
+    return len(effective_text)
 
 
 def _manual_insertion_label(block: TranslatedBlock) -> str:

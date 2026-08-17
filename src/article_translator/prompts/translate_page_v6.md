@@ -76,6 +76,22 @@ Choose exactly one structured block variant for each region:
    footnote. Repeated running heads, page numbers, catchwords, and isolated printer
    signatures are header, footer, or page-number matter, not footnotes.
 
+   A new footnote must also identify the ordinary translated block that owns its
+   inline reference. Choose a unique page-local token of the exact form
+   `[[FOOTNOTE_1]]`, `[[FOOTNOTE_2]]`, and so on. Put that token in the owning
+   ordinary block's `translated_text` at the precise point where the translated
+   footnote marker belongs, and return the identical value as the footnote's
+   `owner_reference_token`. The token is pipeline control data, not visible prose;
+   do not put it in `source_text`, the footnote text, or more than one translated
+   block. Preserve the actual printed reference marker in the owner's
+   `source_text`.
+
+   When the visible evidence does not establish which current-page text owns the
+   note—for example, an unmarked continuation whose earlier owner is outside the
+   current page—set `owner_reference_token=null` and
+   `owner_review_required=true`. Otherwise set `owner_review_required=false`.
+   Never guess an owner merely because a block is nearby.
+
 3. Table tag or manual figure insertion
 
    For a table or table-like region, return one text-free table block at its exact

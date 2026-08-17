@@ -6,7 +6,7 @@ import pytest
 from google.genai import errors, types
 
 from article_translator.adapters.llm.gemini import GeminiPageTranslator, GeminiRequestError
-from article_translator.domain.enums import BlockType
+from article_translator.domain.enums import BlockType, SegmentContinuation
 from article_translator.domain.models import (
     GeneratedBlock,
     GeneratedPagePayload,
@@ -106,6 +106,70 @@ def test_gemini_adapter_maps_multimodal_structured_output(tmp_path: Path) -> Non
 
     translator.close()
     assert client.closed is True
+
+
+def test_gemini_adapter_marks_impossible_continuation_for_review(
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "page.png"
+    image.write_bytes(b"not-a-real-png")
+    parsed: dict[str, object] = {
+        "detected_printed_page_label": None,
+        "blocks": [
+            {
+                "order": 1,
+                "type": "body",
+                "source_text": "First paragraph.",
+                "translated_text": "First paragraph.",
+                "heading_level": None,
+                "paragraph_continuation": "complete",
+                "uncertainties": [],
+                "classification_review_required": False,
+            },
+            {
+                "order": 2,
+                "type": "body",
+                "source_text": "Second paragraph.",
+                "translated_text": "Second paragraph.",
+                "heading_level": None,
+                "paragraph_continuation": "from_previous_page",
+                "uncertainties": [],
+                "classification_review_required": False,
+            },
+        ],
+    }
+    translator = GeminiPageTranslator(
+        api_key="unused",
+        model="gemini-test",
+        api_version="v1",
+        timeout_seconds=120,
+        attempts=3,
+        max_inline_request_bytes=19_000_000,
+        client=FakeClient(
+            SimpleNamespace(
+                parsed=parsed,
+                text=None,
+                response_id="repaired-response",
+                usage_metadata=None,
+            )
+        ),
+    )
+
+    result = translator.translate_page(
+        PageTranslationRequest(
+            original_page_number=53,
+            markdown="source",
+            image_path=image,
+            image_media_type="image/png",
+            prompt="translate",
+            settings=TranslationSettings(),
+        )
+    )
+
+    repaired = result.payload.blocks[1]
+    assert isinstance(repaired, GeneratedBlock)
+    assert repaired.paragraph_continuation is SegmentContinuation.UNKNOWN
+    assert repaired.classification_review_required is True
 
 
 def test_gemini_adapter_maps_table_reconstruction_multimodal_output(tmp_path: Path) -> None:

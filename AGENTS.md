@@ -11,7 +11,7 @@ FastAPI workbench for colleagues. The active architecture is:
 PDF -> paired per-page Markdown + PNG -> structured page translation pass
     -> conditional batched table reconstruction pass for that page
     -> canonical validated document JSON -> immutable translation run
-    -> append-only editorial revisions -> reviewed Markdown/text/LaTeX PDF projections
+    -> append-only editorial revisions -> reviewed LaTeX/PDF/Markdown/text projections
 ```
 
 The web interface is deliberately a small loopback-only internal tool. Preserve
@@ -107,8 +107,9 @@ Markdown.
 ## Non-negotiable data invariants
 
 - `runs/<translation-run-id>/output/document.json` is canonical for that
-  immutable run. Its sibling `document.md` is a reproducible derivative and must
-  never be parsed to recover metadata.
+  immutable run. Its primary compiled sibling `document.tex` and additional
+  `document.md` projection are reproducible derivatives and must never be parsed
+  to recover metadata.
 - `original_page_number` is the 1-based physical position in the PDF.
 - `pdf_page_label` is PDF metadata. `detected_printed_page_label` is visible page
   text. A `page_number` block is retained content. Never merge these meanings.
@@ -117,6 +118,9 @@ Markdown.
   installed MarkItDown version.
 - Pair Markdown and image from the exact same physical page. Refuse provider work
   when independent page counts disagree.
+- When a rerun changes `extraction.image_dpi`, automatically publish a new
+  preparation and clear the active run while preserving prior immutable runs. Do
+  not require `--force` merely to regenerate page renders at a different DPI.
 - Treat the rendered image as primary page evidence and MarkItDown Markdown as
   supplemental context. Empty Markdown must not remove an image page.
 - Every provider request contains exactly one page image and the complete
@@ -127,6 +131,13 @@ Markdown.
   continuation, and classification-review flags only. It emits table,
   table-like, and figure regions as ordered text-free tags. Never smuggle their
   contents into another first-pass block.
+- A newly starting model footnote uses one unique page-local
+  `[[FOOTNOTE_N]]` token at the exact point in its owning translated-text block
+  and repeats that token in the footnote payload. The pipeline removes the token
+  and owns the resulting block ID and Unicode character offset. If ownership is
+  not visible, persist an explicit owner-review flag; never guess. Export owned
+  notes as inline LaTeX footnotes and preserve unresolved notes as reviewable
+  standalone content.
 - A table-bearing page immediately receives one batched structured table pass for
   all of its tagged table and table-like regions. That pass receives the same PNG
   and complete page Markdown/OCR. It may modernize historical shorthand into a
@@ -216,7 +227,9 @@ provider responses, or test snapshots.
 
 TOML owns all web defaults and limits, including loopback host/port, upload/page
 limits, bounded concurrency, status polling, default languages/style/model, and
-the selectable-model allowlist. It also owns
+the selectable-model allowlist. It also owns the default and bounded attempt
+count for per-job Auto continue. Persist that resolved operational policy in the
+active manifest without adding it to page fingerprints. It also owns
 `translation.previous_page_context_count`, which defaults to 2 and is constrained
 to 0–10; zero disables prior-page context. The UI may submit explicit per-job
 input/output languages, model, style, and term mappings. Resolve those through
@@ -260,10 +273,11 @@ library when adequate.
 
 ### Persisted schema or block taxonomy
 
-- The current core schema is 4.0. Supported schema 2.0 and 3.0 reads migrate only
+- The current core schema is 5.0. Supported schema 2.0, 3.0, and 4.0 reads migrate only
   in memory: schema 2.0 translated tables remain legacy translated tables and
   schema 3.0 manual table placeholders remain legacy manual tables. Do not
-  rewrite or silently schedule either form for schema 4.0 reconstruction.
+  rewrite or silently schedule either form for reconstruction. Migrated
+  footnotes have unknown owners and require review.
 - Update Pydantic models in `domain/`.
 - Keep `extra="forbid"` and semantic validators.
 - Bump `SCHEMA_VERSION` for an incompatible persisted change.
@@ -276,7 +290,7 @@ library when adequate.
 - Edit the resource under `prompts/`, not an inline provider string.
 - Bump `PROMPT_VERSION` for a semantic main-pass change and
   `TABLE_PROMPT_VERSION` for a semantic table-pass change. The current contracts
-  are `translate-page-v5` and `reconstruct-tables-v1`.
+  are `translate-page-v6` and `reconstruct-tables-v1`.
 - Keep page Markdown visibly delimited as document data.
 - Delimit any previous finalized page projection as untrusted, read-only context
   and require current-page-only output.
@@ -357,14 +371,21 @@ library when adequate.
   all-occurrence replacement only when the API says more than one unresolved
   annotated match exists. The Articles uncertainty list groups unresolved items by
   structured term identity and orders groups by descending occurrence count.
-- Keep exporter policy explicit. Markdown, plain text, and PDF use the latest
+- Section-type, footnote-owner, and marker-offset corrections are append-only
+  revision metadata. Prevent footnotes from owning other footnotes, prevent a
+  section with owned notes from becoming a footnote until those notes are
+  reassigned, and retain an explicit unknown-owner review state.
+- Keep exporter policy explicit. LaTeX, Markdown, plain text, and PDF use the latest
   effective revision, regardless of review status; do not silently change them
   to accepted-only behavior. Project each format from canonical data and the
-  effective review view; never parse `document.md` to recover structure.
+  effective review view; never parse a compiled projection to recover structure.
 - Treat the server as loopback-only. The bounded executor, upload aliases, and
-  in-progress state are process-local; completed canonical runs are rediscovered
-  from disk by stable translation-run ID. Do not call that discovery a durable
-  queue.
+  live running state are process-local; completed canonical runs and stopped
+  failed manifests are rediscovered from disk by stable translation-run ID.
+  Continue a failed attempt in the same run after revalidating its checkpoints;
+  cancellation of a stopped attempt must retain them. Do not call that discovery
+  a durable queue. Auto continue must remain bounded by TOML and run inline so a
+  single-worker executor cannot deadlock by waiting on its own queue.
 - Add concurrency/history tests before multi-editor behavior.
 
 For a web change, inspect `interfaces/web/app.py`, its strict schemas and static

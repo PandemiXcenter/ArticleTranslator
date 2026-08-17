@@ -11,6 +11,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from article_translator.application.compile_markdown import compile_markdown
+from article_translator.application.export_reviewed import compile_latex
 from article_translator.application.fingerprints import (
     page_input_fingerprint,
     table_input_fingerprint,
@@ -40,6 +41,7 @@ from article_translator.domain.models import (
     GeneratedFootnoteBlock,
     GeneratedManualInsertionBlock,
     GeneratedTableMarkdown,
+    GeneratedTextBlock,
     JobManifest,
     MarkdownExportSettings,
     PageFailure,
@@ -101,17 +103,14 @@ class TranslationPipeline:
             repository = self._repository_factory(job_dir)
             existing_manifest = repository.read_manifest() if repository.has_manifest() else None
 
-            if existing_manifest is not None and not force:
+            if existing_manifest is not None:
                 if existing_manifest.source_file_sha256 != source_hash:
                     raise ArtifactError("Existing job manifest belongs to a different source file")
-                if existing_manifest.image_dpi != image_dpi:
-                    raise StaleCheckpointError(
-                        "Extraction image DPI changed; rerun ingestion with --force"
-                    )
-                for page in existing_manifest.pages:
-                    repository.resolve(page.markdown)
-                    repository.resolve(page.image)
-                return job_dir
+                if not force and existing_manifest.image_dpi == image_dpi:
+                    for page in existing_manifest.pages:
+                        repository.resolve(page.markdown)
+                        repository.resolve(page.image)
+                    return job_dir
 
             preparation_id, pages = self._prepare_pages_transactionally(
                 source_snapshot,
@@ -368,9 +367,13 @@ class TranslationPipeline:
         translation_run_id = manifest.translation_run_id
         document = repository.read_document(translation_run_id)
         self._validate_document_for_manifest(document, manifest)
-        output = repository.write_markdown(
+        repository.write_markdown(
             translation_run_id,
             compile_markdown(document, settings),
+        )
+        output = repository.write_latex(
+            translation_run_id,
+            compile_latex(document, settings),
         )
         manifest = manifest.model_copy(
             update={
@@ -496,6 +499,17 @@ def _to_translated_blocks(
         if previous_page is not None
         else None
     )
+    translated_text_by_order: dict[int, str] = {}
+    owner_by_token: dict[str, tuple[str, int]] = {}
+    for generated in generated_blocks:
+        if not isinstance(generated, GeneratedTextBlock):
+            continue
+        translated_text, token_offsets = _strip_footnote_reference_tokens(generated.translated_text)
+        translated_text_by_order[generated.order] = translated_text
+        generated_owner_block_id = f"p{original_page_number:04d}-b{generated.order:04d}"
+        for token, offset in token_offsets.items():
+            owner_by_token[token] = (generated_owner_block_id, offset)
+
     translated: list[TranslatedBlock] = []
     for block in generated_blocks:
         continues_from_block_id = None
@@ -513,14 +527,41 @@ def _to_translated_blocks(
                     "A previous-page paragraph continuation has no preceding body block"
                 )
             continues_from_block_id = previous_body.block_id
+        owner_block_id = None
+        owner_offset = None
+        if isinstance(block, GeneratedFootnoteBlock) and block.owner_reference_token is not None:
+            owner_block_id, owner_offset = owner_by_token[block.owner_reference_token]
         translated.append(
             _to_translated_block(
                 original_page_number,
                 block,
                 continues_from_block_id=continues_from_block_id,
+                translated_text_override=translated_text_by_order.get(block.order),
+                footnote_owner_block_id=owner_block_id,
+                footnote_anchor_offset=owner_offset,
             )
         )
     return translated
+
+
+def _strip_footnote_reference_tokens(value: str) -> tuple[str, dict[str, int]]:
+    """Remove provider-only anchor tokens while retaining trusted Unicode offsets."""
+
+    parts: list[str] = []
+    offsets: dict[str, int] = {}
+    cursor = 0
+    rendered_length = 0
+    for match in re.finditer(r"\[\[FOOTNOTE_[1-9]\d*\]\]", value):
+        prefix = value[cursor : match.start()]
+        parts.append(prefix)
+        rendered_length += len(prefix)
+        offsets[match.group()] = rendered_length
+        cursor = match.end()
+    parts.append(value[cursor:])
+    translated_text = "".join(parts)
+    if not translated_text.strip():
+        raise ValueError("a footnote reference token cannot be the owner's entire translation")
+    return translated_text, offsets
 
 
 def _to_translated_block(
@@ -528,6 +569,9 @@ def _to_translated_block(
     block: GeneratedBlockVariant,
     *,
     continues_from_block_id: str | None = None,
+    translated_text_override: str | None = None,
+    footnote_owner_block_id: str | None = None,
+    footnote_anchor_offset: int | None = None,
 ) -> TranslatedBlock:
     block_id = f"p{original_page_number:04d}-b{block.order:04d}"
     if isinstance(block, GeneratedManualInsertionBlock):
@@ -553,6 +597,9 @@ def _to_translated_block(
             translated_text=block.translated_text,
             segment_handling=SegmentHandling.TRANSLATE,
             footnote_marker=block.footnote_marker,
+            footnote_owner_block_id=footnote_owner_block_id,
+            footnote_anchor_offset=footnote_anchor_offset,
+            footnote_owner_review_required=block.owner_review_required,
             continuation=block.continuation,
             uncertainties=block.uncertainties,
             classification_review_required=block.classification_review_required,
@@ -563,7 +610,7 @@ def _to_translated_block(
         order=block.order,
         type=block.type,
         source_text=block.source_text,
-        translated_text=block.translated_text,
+        translated_text=translated_text_override or block.translated_text,
         heading_level=block.heading_level,
         paragraph_continuation=block.paragraph_continuation,
         continues_from_block_id=continues_from_block_id,

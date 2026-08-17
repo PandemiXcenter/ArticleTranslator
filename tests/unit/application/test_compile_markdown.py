@@ -32,6 +32,7 @@ def block(order: int, block_type: BlockType, text: str) -> TranslatedBlock:
         type=block_type,
         source_text=f"source {order}",
         translated_text=text,
+        footnote_owner_review_required=block_type is BlockType.FOOTNOTE,
     )
 
 
@@ -286,6 +287,7 @@ def test_compiler_labels_footnote_marker_and_continuation() -> None:
         source_text="Fortsat note.",
         translated_text="Continued note.",
         footnote_marker="12",
+        footnote_owner_review_required=True,
         continuation=SegmentContinuation.FROM_PREVIOUS_AND_TO_NEXT_PAGE,
     )
     base = document()

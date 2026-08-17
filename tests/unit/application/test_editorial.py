@@ -622,3 +622,136 @@ def test_reviewed_latex_converts_canonical_gfm_table_without_floating() -> None:
     assert "\\textbf{Date} & \\textbf{Deaths}" in latex
     assert "3 July & 3" in latex
     assert "\\begin{table}" not in latex
+
+
+def test_reviewed_latex_places_owned_footnote_inline() -> None:
+    owner = _block(
+        "p0001-b0001",
+        1,
+        "Tekst* fortsætter.",
+        "Text continues.",
+    )
+    footnote = TranslatedBlock(
+        block_id="p0001-b0002",
+        original_page_number=1,
+        order=2,
+        type=BlockType.FOOTNOTE,
+        source_text="Notetekst.",
+        translated_text="Note & explanation.",
+        footnote_marker="*",
+        footnote_owner_block_id=owner.block_id,
+        footnote_anchor_offset=4,
+        footnote_owner_review_required=False,
+        continuation=SegmentContinuation.COMPLETE,
+    )
+
+    latex = EditorialService(MemoryRevisionRepository()).compile_reviewed_latex(
+        _document(owner, footnote),
+        RUN_ID,
+        MarkdownExportSettings(include_page_comments=False),
+    )
+
+    assert "Text\\footnote{Note \\& explanation.} continues." in latex
+    assert "owner requires review" not in latex
+
+
+def test_editor_can_change_section_type_and_assign_footnote_owner_append_only() -> None:
+    owner = _block("p0001-b0001", 1, "Ejer", "Owner text")
+    candidate = _block("p0001-b0002", 2, "Note", "Candidate note")
+    document = _document(owner, candidate)
+    repository = MemoryRevisionRepository()
+    service = EditorialService(repository)
+
+    revision = service.revise_block(
+        document,
+        RUN_ID,
+        candidate.block_id,
+        "Reviewed note",
+        block_type=BlockType.FOOTNOTE,
+        footnote_owner_block_id=owner.block_id,
+        footnote_anchor_offset=5,
+        expected_base_revision=0,
+    )
+    reviewed = service.review_document(document, RUN_ID).pages[0].blocks[1]
+
+    assert revision.effective_type is BlockType.FOOTNOTE
+    assert revision.footnote_owner_block_id == owner.block_id
+    assert revision.footnote_anchor_offset == 5
+    assert revision.schema_version == "2.0"
+    assert reviewed.machine_type is BlockType.BODY
+    assert reviewed.type is BlockType.FOOTNOTE
+    assert reviewed.footnote_owner_block_id == owner.block_id
+    assert reviewed.footnote_owner_review_required is False
+    assert document.pages[0].blocks[1].type is BlockType.BODY
+    assert "Owner\\footnote{Reviewed note} text" in service.compile_reviewed_latex(
+        document,
+        RUN_ID,
+        MarkdownExportSettings(include_page_comments=False),
+    )
+    markdown = service.compile_reviewed_markdown(
+        document,
+        RUN_ID,
+        MarkdownExportSettings(include_page_comments=False),
+    )
+    assert "Owner[^p0001-b0002] text" in markdown
+    assert "[^p0001-b0002]: Reviewed note" in markdown
+
+    service.revise_block(
+        document,
+        RUN_ID,
+        candidate.block_id,
+        "Reviewed note",
+        block_type=BlockType.FOOTNOTE,
+        footnote_owner_block_id=None,
+        expected_base_revision=1,
+    )
+    unresolved = service.review_document(document, RUN_ID).pages[0].blocks[1]
+    assert unresolved.footnote_owner_block_id is None
+    assert unresolved.footnote_owner_review_required is True
+
+
+def test_owner_with_attached_footnote_cannot_be_retyped_as_footnote() -> None:
+    owner = _block("p0001-b0001", 1, "Ejer", "Owner")
+    footnote = TranslatedBlock(
+        block_id="p0001-b0002",
+        original_page_number=1,
+        order=2,
+        type=BlockType.FOOTNOTE,
+        source_text="Note",
+        translated_text="Footnote",
+        footnote_owner_block_id=owner.block_id,
+        footnote_anchor_offset=5,
+        footnote_owner_review_required=False,
+        continuation=SegmentContinuation.COMPLETE,
+    )
+    service = EditorialService(MemoryRevisionRepository())
+
+    with pytest.raises(EditorialTargetError, match="Reassign"):
+        service.revise_block(
+            _document(owner, footnote),
+            RUN_ID,
+            owner.block_id,
+            "Owner",
+            block_type=BlockType.FOOTNOTE,
+            expected_base_revision=0,
+        )
+
+
+def test_retyping_body_as_footnote_removes_body_continuation_from_review() -> None:
+    body = _block("p0001-b0001", 1, "Tekst", "Text").model_copy(
+        update={"paragraph_continuation": SegmentContinuation.TO_NEXT_PAGE}
+    )
+    service = EditorialService(MemoryRevisionRepository())
+    service.revise_block(
+        _document(body),
+        RUN_ID,
+        body.block_id,
+        "Text",
+        block_type=BlockType.FOOTNOTE,
+        expected_base_revision=0,
+    )
+
+    reviewed = service.review_document(_document(body), RUN_ID).pages[0].blocks[0]
+    assert reviewed.type is BlockType.FOOTNOTE
+    assert reviewed.paragraph_continuation is None
+    assert reviewed.continues_from_block_id is None

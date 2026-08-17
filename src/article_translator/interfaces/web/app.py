@@ -45,6 +45,7 @@ from article_translator.domain.models import DocumentTranslation
 from article_translator.interfaces.web.schemas import (
     ApiKeySettingsRequest,
     BlockRevisionRequest,
+    ContinueJobRequest,
     GlossaryEntry,
     JobTranslationSettings,
     ReviewPositionRequest,
@@ -143,6 +144,11 @@ def create_app(
                 "model": config.provider.gemini.model,
                 "selectable_models": config.provider.gemini.selectable_models,
             },
+            "extraction": config.extraction.model_dump(mode="json"),
+            "automation": {
+                "auto_continue_default": config.web.auto_continue_default,
+                "auto_continue_attempts": config.web.auto_continue_attempts,
+            },
             "api_key_configured": (
                 _environment_api_key_configured() or local_secret_store.has_gemini_api_key()
             ),
@@ -160,6 +166,27 @@ def create_app(
     def list_review_jobs() -> dict[str, object]:
         return {"jobs": [asdict(snapshot) for snapshot in manager.list_reviews()]}
 
+    @app.get("/api/jobs/recoverable")
+    def list_recoverable_jobs() -> dict[str, object]:
+        return {"jobs": [asdict(snapshot) for snapshot in manager.list_recoverable_jobs()]}
+
+    @app.delete("/api/jobs/{job_id}", status_code=204)
+    def delete_review_job(
+        job_id: str,
+        at_csrf: Annotated[str | None, Cookie()] = None,
+        x_csrf_token: Annotated[str | None, Header()] = None,
+    ) -> Response:
+        _require_csrf(at_csrf, x_csrf_token)
+        try:
+            manager.delete_review(job_id)
+        except WebJobNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ArtifactError, OSError) as exc:
+            raise HTTPException(
+                status_code=409, detail="Article could not be deleted safely"
+            ) from exc
+        return Response(status_code=204)
+
     @app.post("/api/jobs", status_code=202)
     async def create_job(
         pdf: Annotated[UploadFile, File()],
@@ -171,7 +198,7 @@ def create_app(
     ) -> JSONResponse:
         _require_csrf(at_csrf, x_csrf_token)
         resolved_glossary = _parse_glossary(glossary, config)
-        runtime_config = _parse_job_settings(settings, config)
+        runtime_config, auto_continue = _parse_job_settings(settings, config)
         session_api_key = _parse_session_api_key(gemini_api_key)
         upload_path, display_filename = await _stage_upload(pdf, config)
         try:
@@ -181,6 +208,7 @@ def create_app(
                 glossary=resolved_glossary,
                 runtime_config=runtime_config,
                 api_key=session_api_key,
+                auto_continue=auto_continue,
             )
         except Exception:
             _remove_upload_directory(upload_path, config.paths.artifacts_dir)
@@ -211,6 +239,32 @@ def create_app(
     def job_status(job_id: str) -> dict[str, object]:
         try:
             return asdict(manager.get(job_id))
+        except WebJobNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/jobs/{job_id}/continue", status_code=202)
+    def continue_job(
+        job_id: str,
+        command: ContinueJobRequest,
+        at_csrf: Annotated[str | None, Cookie()] = None,
+        x_csrf_token: Annotated[str | None, Header()] = None,
+    ) -> JSONResponse:
+        _require_csrf(at_csrf, x_csrf_token)
+        try:
+            snapshot = manager.continue_job(job_id, api_key=command.api_key)
+        except WebJobNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return JSONResponse(asdict(snapshot), status_code=202)
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(
+        job_id: str,
+        at_csrf: Annotated[str | None, Cookie()] = None,
+        x_csrf_token: Annotated[str | None, Header()] = None,
+    ) -> dict[str, object]:
+        _require_csrf(at_csrf, x_csrf_token)
+        try:
+            return asdict(manager.cancel_job(job_id))
         except WebJobNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -273,6 +327,9 @@ def create_app(
             translation_run_id,
             command.block_id,
             command.editorial_text,
+            block_type=command.type,
+            footnote_owner_block_id=command.footnote_owner_block_id,
+            footnote_anchor_offset=command.footnote_anchor_offset,
             expected_base_revision=command.expected_base_revision,
             status=command.status,
         )
@@ -338,6 +395,20 @@ def create_app(
             local_pdf_compiler.compile(latex),
             media_type="application/pdf",
             headers={"Content-Disposition": 'attachment; filename="reviewed-translation.pdf"'},
+        )
+
+    @app.get("/api/jobs/{job_id}/export.tex")
+    def export_reviewed_latex(job_id: str) -> Response:
+        document, translation_run_id, service, _ = _review_context(manager, job_id)
+        latex = service.compile_reviewed_latex(
+            document,
+            translation_run_id,
+            config.export,
+        )
+        return Response(
+            latex,
+            media_type="application/x-tex; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="reviewed-translation.tex"'},
         )
 
     @app.exception_handler(WebJobNotReadyError)
@@ -431,13 +502,19 @@ def _parse_glossary(raw: str, config: ProjectConfig) -> dict[str, str]:
     return glossary
 
 
-def _parse_job_settings(raw: str | None, config: ProjectConfig) -> ProjectConfig:
+def _parse_job_settings(
+    raw: str | None,
+    config: ProjectConfig,
+) -> tuple[ProjectConfig, bool]:
     if raw is None or not raw.strip():
         requested = JobTranslationSettings(
             model=config.provider.gemini.model,
             source_language=config.translation.source_language,
             target_language=config.translation.target_language,
             style=config.translation.style,
+            previous_page_context_count=config.translation.previous_page_context_count,
+            image_dpi=config.extraction.image_dpi,
+            auto_continue=config.web.auto_continue_default,
         )
     else:
         try:
@@ -462,13 +539,19 @@ def _parse_job_settings(raw: str | None, config: ProjectConfig) -> ProjectConfig
             "source_language": requested.source_language,
             "target_language": requested.target_language,
             "style": requested.style,
+            "previous_page_context_count": requested.previous_page_context_count,
         }
     )
-    return config.model_copy(
-        update={
-            "provider": provider,
-            "translation": translation,
-        }
+    extraction = config.extraction.model_copy(update={"image_dpi": requested.image_dpi})
+    return (
+        config.model_copy(
+            update={
+                "provider": provider,
+                "translation": translation,
+                "extraction": extraction,
+            }
+        ),
+        requested.auto_continue,
     )
 
 
@@ -592,6 +675,7 @@ def _review_payload(review: ReviewDocument) -> dict[str, object]:
                         "block_id": block.block_id,
                         "original_page_number": block.original_page_number,
                         "order": block.order,
+                        "machine_type": block.machine_type.value,
                         "type": block.type.value,
                         "segment_handling": block.segment_handling.value,
                         "source_text": block.source_text,
@@ -603,6 +687,9 @@ def _review_payload(review: ReviewDocument) -> dict[str, object]:
                             else None
                         ),
                         "footnote_marker": block.footnote_marker,
+                        "footnote_owner_block_id": block.footnote_owner_block_id,
+                        "footnote_anchor_offset": block.footnote_anchor_offset,
+                        "footnote_owner_review_required": (block.footnote_owner_review_required),
                         "continuation": (
                             block.continuation.value if block.continuation is not None else None
                         ),

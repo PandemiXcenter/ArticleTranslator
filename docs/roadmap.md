@@ -20,9 +20,9 @@ Implemented:
 - qualitative uncertain-term output;
 - immutable translation runs, per-page atomic checkpoints, intermediate
   first-pass table checkpoints, and stage-aware safe resume;
-- canonical JSON dataset and deterministic machine Markdown compiler;
-- schema 4.0 table-reconstruction contracts and read-only schema 2.0/3.0
-  compatibility migrations;
+- canonical JSON dataset and deterministic machine XeLaTeX and Markdown compilers;
+- schema 5.0 footnote-ownership/table-reconstruction contracts and read-only
+  schema 2.0/3.0/4.0 compatibility migrations;
 - unit, local-integration, and fake-provider end-to-end tests.
 
 Still required before production claims:
@@ -42,6 +42,9 @@ Implemented:
 
 - strict per-page structured output with block types and qualitative
   uncertainties;
+- page-local model footnote-reference tokens resolved by the pipeline into
+  trusted owner block IDs and character offsets, with unknown ownership retained
+  for review;
 - corpus-informed segment rules: two-dimensional tables and table-like regions
   become ordered text-free first-pass tags, while surrounding prose, captions,
   and notes remain translated;
@@ -77,7 +80,9 @@ Deferred:
 - optional forward-looking context or a reviewed mechanism for retroactively
   repairing a previous page's trailing fragment;
 - source-coverage and duplicate-block diagnostics;
-- opt-in schema repair with a strict attempt/cost cap;
+- broader opt-in schema repair with a strict attempt/cost cap; the Gemini adapter
+  only repairs impossible page-edge continuation claims into explicit review
+  states;
 - additional provider adapters, added only when a concrete need exists.
 
 ## Phase 3 — editorial revision model
@@ -102,11 +107,12 @@ Implemented:
   unresolved model-annotated matches;
 - reviewed Markdown, plain text, and LaTeX/PDF generated from latest effective
   revisions without mutating canonical machine output;
+- append-only section-type, footnote-owner, and inline-marker editing;
 - revision, conflict, uncertainty, and reproducible export tests.
 
 Deferred:
 
-- block split/merge and block-type correction;
+- block split/merge;
 - editor identity entry and a dedicated revision-history screen;
 - explicit machine/latest/accepted-only export policy selection;
 - multi-editor locking beyond optimistic conflict detection;
@@ -144,6 +150,10 @@ Implemented:
 - plain tabbed Translate, Term mappings, Settings, and Articles workspace;
 - laptop PDF selection and language direction on job start;
 - job progress polling;
+- failed-run discovery plus Continue/Cancel controls that preserve and revalidate
+  successful same-run page checkpoints across browser/server restarts;
+- a TOML-defaulted per-job Auto continue switch with a bounded retry count and
+  persisted operational provenance;
 - authoritative source-term/required-translation rows;
 - allowlisted Gemini model, translation style, and key controls;
 - side-by-side original/effective translation blocks grouped by
@@ -161,13 +171,15 @@ Implemented:
 - an Uncertain terms list grouped and ordered by unresolved occurrence count,
   with page locations and first-occurrence navigation;
 - conditional Review/Read actions based on accepted-block progress;
-- export menus for reviewed Markdown, plain text, and locally typeset XeLaTeX PDF.
+- export menus for reviewed XeLaTeX source, Markdown, plain text, and locally
+  typeset XeLaTeX PDF;
+- section-type correction and footnote owner/marker controls.
 
 Deferred:
 
-- cancellation and per-page retry controls in the browser;
+- interruption of an active provider request and arbitrary per-page retry;
 - filters for unreviewed, uncertain, failed, or changed blocks;
-- block type editing, split/merge, revision history, and reviewer identity UI;
+- split/merge, revision history, and reviewer identity UI;
 - comprehensive browser automation and cross-browser visual verification;
 - remote access or deployment.
 

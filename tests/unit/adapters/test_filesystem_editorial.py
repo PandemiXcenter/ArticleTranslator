@@ -45,6 +45,7 @@ def _revision(
         revision_number=number,
         base_revision=number - 1,
         editorial_text=text,
+        effective_type=BlockType.BODY,
     )
 
 
@@ -143,8 +144,8 @@ def test_filesystem_reads_v2_document_without_rewriting_immutable_artifact(
 
     restored = repository.read_document(RUN_ID)
 
-    assert restored.schema_version == "4.0"
-    assert restored.pages[0].schema_version == "4.0"
+    assert restored.schema_version == "5.0"
+    assert restored.pages[0].schema_version == "5.0"
     assert restored.pages[0].blocks[0].legacy_translated_table is True
     assert restored.pages[0].blocks[0].type is BlockType.TABLE
     assert json.loads(document_path.read_text(encoding="utf-8"))["schema_version"] == "2.0"
@@ -211,9 +212,78 @@ def test_filesystem_reads_v3_manual_table_as_legacy_without_reconstruction_or_re
 
     restored = repository.read_document(RUN_ID)
 
-    assert restored.schema_version == "4.0"
+    assert restored.schema_version == "5.0"
     assert restored.pages[0].blocks[0].legacy_manual_table is True
     assert restored.pages[0].blocks[0].segment_handling is SegmentHandling.MANUAL_INSERTION
+    assert document_path.read_bytes() == original_bytes
+
+
+def test_filesystem_reads_v4_footnote_with_unknown_owner_without_rewrite(tmp_path: Path) -> None:
+    repository = FilesystemArtifactRepository(tmp_path / "job")
+    reference = ArtifactRef(
+        path="prepared/source.txt",
+        sha256=DOCUMENT_ID,
+        media_type="text/plain",
+        byte_count=1,
+    )
+    footnote = TranslatedBlock(
+        block_id=BLOCK_ID,
+        original_page_number=1,
+        order=1,
+        type=BlockType.FOOTNOTE,
+        source_text="Note",
+        translated_text="Footnote",
+        footnote_owner_review_required=True,
+        continuation=SegmentContinuation.COMPLETE,
+    )
+    page = PageTranslation(
+        translation_run_id=RUN_ID,
+        original_page_number=1,
+        extraction_status=ExtractionStatus.EXTRACTED,
+        extracted_character_count=1,
+        source_markdown="note OCR",
+        source_markdown_artifact=reference,
+        source_image=reference.model_copy(update={"media_type": "image/png"}),
+        blocks=[footnote],
+        input_fingerprint=DOCUMENT_ID,
+        provider=ProviderMetadata(
+            provider="legacy",
+            model="legacy-v4",
+            prompt_version="translate-page-v5",
+        ),
+    )
+    document = DocumentTranslation(
+        translation_run_id=RUN_ID,
+        document_id=DOCUMENT_ID,
+        job_id="legacy-job",
+        source_file_name="legacy.pdf",
+        source_file_sha256=DOCUMENT_ID,
+        page_count=1,
+        translation_settings=TranslationSettings(),
+        pages=[page],
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    payload = document.model_dump(mode="json")
+    payload["schema_version"] = "4.0"
+    payload["pages"][0]["schema_version"] = "4.0"
+    for field in (
+        "footnote_owner_block_id",
+        "footnote_anchor_offset",
+        "footnote_owner_review_required",
+    ):
+        payload["pages"][0]["blocks"][0].pop(field)
+    document_path = tmp_path / "job" / "runs" / RUN_ID / "output" / "document.json"
+    document_path.parent.mkdir(parents=True)
+    original_bytes = json.dumps(payload).encode()
+    document_path.write_bytes(original_bytes)
+
+    restored = repository.read_document(RUN_ID)
+
+    restored_footnote = restored.pages[0].blocks[0]
+    assert restored.schema_version == "5.0"
+    assert restored_footnote.footnote_owner_block_id is None
+    assert restored_footnote.footnote_anchor_offset is None
+    assert restored_footnote.footnote_owner_review_required is True
     assert document_path.read_bytes() == original_bytes
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -32,6 +33,7 @@ class RecordingJobManager:
                 Path,
                 ProjectConfig,
                 SecretStr | None,
+                bool,
             ]
         ] = []
         self.snapshot = WebJobSnapshot(
@@ -43,6 +45,18 @@ class RecordingJobManager:
             error=None,
             translation_run_id=None,
         )
+        self.deleted_reviews: list[str] = []
+        self.continued_keys: list[SecretStr | None] = []
+        self.cancelled_jobs: list[str] = []
+        self.recoverable_snapshot = WebJobSnapshot(
+            job_id="c" * 32,
+            status=WebJobStatus.FAILED,
+            filename="stopped.pdf",
+            current_page=53,
+            total_pages=95,
+            error="Page 53: stopped",
+            translation_run_id="c" * 32,
+        )
 
     def submit(
         self,
@@ -52,6 +66,7 @@ class RecordingJobManager:
         glossary: dict[str, str],
         runtime_config: ProjectConfig,
         api_key: SecretStr | None,
+        auto_continue: bool,
     ) -> WebJobSnapshot:
         self.submissions.append(
             (
@@ -61,6 +76,7 @@ class RecordingJobManager:
                 upload_path,
                 runtime_config,
                 api_key,
+                auto_continue,
             )
         )
         shutil.rmtree(upload_path.parent)
@@ -86,6 +102,39 @@ class RecordingJobManager:
                 updated_at=datetime(2026, 8, 4, 12, tzinfo=UTC),
             )
         ]
+
+    def list_recoverable_jobs(self) -> list[WebJobSnapshot]:
+        return [self.recoverable_snapshot]
+
+    def continue_job(
+        self,
+        job_id: str,
+        *,
+        api_key: SecretStr | None = None,
+    ) -> WebJobSnapshot:
+        if job_id != self.recoverable_snapshot.job_id:
+            raise WebJobNotFoundError("Translation job was not found")
+        self.continued_keys.append(api_key)
+        return replace(
+            self.recoverable_snapshot,
+            status=WebJobStatus.QUEUED,
+            error=None,
+        )
+
+    def cancel_job(self, job_id: str) -> WebJobSnapshot:
+        if job_id != self.recoverable_snapshot.job_id:
+            raise WebJobNotFoundError("Translation job was not found")
+        self.cancelled_jobs.append(job_id)
+        return replace(
+            self.recoverable_snapshot,
+            status=WebJobStatus.CANCELLED,
+            error="Translation paused. Completed page checkpoints were kept.",
+        )
+
+    def delete_review(self, translation_run_id: str) -> None:
+        if translation_run_id != "b" * 32:
+            raise WebJobNotFoundError("Translation job was not found")
+        self.deleted_reviews.append(translation_run_id)
 
     def shutdown(self) -> None:
         return None
@@ -117,6 +166,10 @@ def test_index_and_public_config_never_expose_secret(tmp_path: Path) -> None:
         'data-tab="review"',
         "Input language",
         "Output language",
+        "Job settings",
+        "Previous-page text context",
+        "Page image resolution (DPI)",
+        "Auto continue",
         "Save on this computer",
         "Original page",
         "Translated text",
@@ -125,8 +178,11 @@ def test_index_and_public_config_never_expose_secret(tmp_path: Path) -> None:
         "Uncertain terms (0)",
         ">Articles</button>",
         "LaTeX PDF (.pdf)",
+        "LaTeX source (.tex)",
         "Markdown (.md)",
         "Plain text (.txt)",
+        'data-action="continue-job"',
+        'data-action="cancel-job"',
     ):
         assert expected_control in index.text
     assert index.headers["cache-control"] == "no-store"
@@ -138,6 +194,11 @@ def test_index_and_public_config_never_expose_secret(tmp_path: Path) -> None:
     assert payload["translation"]["source_language"] == "Danish"
     assert payload["translation"]["target_language"] == "English"
     assert payload["provider"]["model"] == "gemini-3.6-flash"
+    assert payload["extraction"]["image_dpi"] == 150
+    assert payload["automation"] == {
+        "auto_continue_default": False,
+        "auto_continue_attempts": 1,
+    }
     assert "gemini-3.5-flash-lite" in payload["provider"]["selectable_models"]
     assert "review_context_pages" not in payload["limits"]
 
@@ -189,6 +250,63 @@ def test_review_catalog_returns_stable_completed_runs(tmp_path: Path) -> None:
     }
 
 
+def test_failed_job_commands_require_csrf_and_never_return_api_key(
+    tmp_path: Path,
+) -> None:
+    config = configured_for_tmp(tmp_path)
+    manager = RecordingJobManager()
+    app = create_app(config, job_manager=cast(WebJobManager, manager))
+    run_id = manager.recoverable_snapshot.job_id
+
+    with TestClient(app) as client:
+        recoverable = client.get("/api/jobs/recoverable")
+        rejected = client.post(
+            f"/api/jobs/{run_id}/continue",
+            json={"api_key": "temporary-key"},
+        )
+        client.get("/")
+        token = client.cookies["at_csrf"]
+        continued = client.post(
+            f"/api/jobs/{run_id}/continue",
+            json={"api_key": "temporary-key"},
+            headers={"X-CSRF-Token": token},
+        )
+        cancelled = client.post(
+            f"/api/jobs/{run_id}/cancel",
+            headers={"X-CSRF-Token": token},
+        )
+
+    assert recoverable.status_code == 200
+    assert recoverable.json()["jobs"][0]["current_page"] == 53
+    assert rejected.status_code == 403
+    assert continued.status_code == 202
+    assert "temporary-key" not in continued.text
+    assert manager.continued_keys[0] is not None
+    assert manager.continued_keys[0].get_secret_value() == "temporary-key"
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    assert manager.cancelled_jobs == [run_id]
+
+
+def test_article_delete_requires_csrf_and_calls_manager(tmp_path: Path) -> None:
+    config = configured_for_tmp(tmp_path)
+    manager = RecordingJobManager()
+    app = create_app(config, job_manager=cast(WebJobManager, manager))
+    run_id = "b" * 32
+
+    with TestClient(app) as client:
+        rejected = client.delete(f"/api/jobs/{run_id}")
+        client.get("/")
+        deleted = client.delete(
+            f"/api/jobs/{run_id}",
+            headers={"X-CSRF-Token": client.cookies["at_csrf"]},
+        )
+
+    assert rejected.status_code == 403
+    assert deleted.status_code == 204
+    assert manager.deleted_reviews == [run_id]
+
+
 def test_review_frontend_mounts_all_pages_and_uses_delegated_handlers(
     tmp_path: Path,
 ) -> None:
@@ -215,10 +333,24 @@ def test_review_frontend_mounts_all_pages_and_uses_delegated_handlers(
         javascript
     )
     assert 'mappingBody.addEventListener("click", handleMappingClick)' in javascript
+    assert 'progressErrorActions.addEventListener("click", handleProgressAction)' in javascript
+    assert "function continueStoppedJob" in javascript
+    assert 'apiRequest("/api/jobs/recoverable")' in javascript
     assert "Machine-reconstructed table" in javascript
     assert "Show original machine reconstruction" in javascript
     assert "function renderUncertaintyGroupList" in javascript
     assert "function makeExportMenu" in javascript
+    assert "section-type-select" in javascript
+    assert "footnote-owner-select" in javascript
+    assert "footnote-anchor-input" in javascript
+    assert "Marker after character" in javascript
+    assert 'translationContent.addEventListener("change", handleReviewControlChange)' in javascript
+    assert "function deleteLibraryReview" in javascript
+    assert 'data-testid="previous-page-context-count"' in html
+    assert 'data-testid="page-image-dpi"' in html
+    assert 'data-testid="auto-continue"' in html
+    assert "auto_continue: autoContinue.checked" in javascript
+    assert 'remove.dataset.action = "delete-review"' in javascript
     assert 'reviewComplete\n        ? "Read"' in javascript
     assert ': "Review"' in javascript
     assert "link.href = exportUrl(jobId, format)" in javascript
@@ -278,6 +410,7 @@ def test_upload_requires_csrf_and_confines_hostile_filename(tmp_path: Path) -> N
     assert runtime_config.translation.source_language == "Danish"
     assert runtime_config.translation.target_language == "English"
     assert manager.submissions[0][5] is None
+    assert manager.submissions[0][6] is False
     assert staged_path.parent.parent == config.paths.artifacts_dir / ".uploads"
     assert not staged_path.exists()
 
@@ -328,6 +461,9 @@ def test_job_uses_selected_languages_model_style_and_session_key(
         "source_language": "Latin",
         "target_language": "German",
         "style": "faithful",
+        "previous_page_context_count": 4,
+        "image_dpi": 225,
+        "auto_continue": True,
     }
 
     with TestClient(app) as client:
@@ -351,9 +487,12 @@ def test_job_uses_selected_languages_model_style_and_session_key(
     assert runtime_config.translation.source_language == "Latin"
     assert runtime_config.translation.target_language == "German"
     assert runtime_config.translation.style.value == "faithful"
+    assert runtime_config.translation.previous_page_context_count == 4
+    assert runtime_config.extraction.image_dpi == 225
     submitted_secret = manager.submissions[0][5]
     assert submitted_secret is not None
     assert submitted_secret.get_secret_value() == "temporary_key_123"
+    assert manager.submissions[0][6] is True
 
 
 def test_job_rejects_model_outside_config_allowlist(tmp_path: Path) -> None:
@@ -375,6 +514,9 @@ def test_job_rejects_model_outside_config_allowlist(tmp_path: Path) -> None:
                         "source_language": "Danish",
                         "target_language": "English",
                         "style": "balanced",
+                        "previous_page_context_count": 2,
+                        "image_dpi": 150,
+                        "auto_continue": False,
                     }
                 ),
             },
@@ -384,6 +526,45 @@ def test_job_rejects_model_outside_config_allowlist(tmp_path: Path) -> None:
     assert response.status_code == 422
     assert manager.submissions == []
     assert not config.paths.artifacts_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("previous_page_context_count", "image_dpi"),
+    [(11, 150), (2, 601)],
+)
+def test_job_rejects_out_of_range_context_and_render_settings(
+    tmp_path: Path,
+    previous_page_context_count: int,
+    image_dpi: int,
+) -> None:
+    config = configured_for_tmp(tmp_path)
+    manager = RecordingJobManager()
+    app = create_app(config, job_manager=cast(WebJobManager, manager))
+
+    with TestClient(app) as client:
+        client.get("/")
+        response = client.post(
+            "/api/jobs",
+            files={"pdf": ("article.pdf", b"%PDF-1.7", "application/pdf")},
+            data={
+                "glossary": "[]",
+                "settings": json.dumps(
+                    {
+                        "model": config.provider.gemini.model,
+                        "source_language": "Danish",
+                        "target_language": "English",
+                        "style": "balanced",
+                        "previous_page_context_count": previous_page_context_count,
+                        "image_dpi": image_dpi,
+                        "auto_continue": False,
+                    }
+                ),
+            },
+            headers={"X-CSRF-Token": client.cookies["at_csrf"]},
+        )
+
+    assert response.status_code == 422
+    assert manager.submissions == []
 
 
 def test_settings_can_keep_key_for_session_or_save_and_clear_it_locally(

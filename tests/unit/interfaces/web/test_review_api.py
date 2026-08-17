@@ -151,6 +151,7 @@ def test_review_revision_replace_all_and_export_contract(tmp_path: Path) -> None
             json={
                 "block_id": BLOCK_ID,
                 "editorial_text": "olde and olde",
+                "type": "body",
                 "expected_base_revision": 0,
                 "status": "accepted",
             },
@@ -161,6 +162,7 @@ def test_review_revision_replace_all_and_export_contract(tmp_path: Path) -> None
             json={
                 "block_id": BLOCK_ID,
                 "editorial_text": "stale edit",
+                "type": "body",
                 "expected_base_revision": 0,
                 "status": "accepted",
             },
@@ -181,6 +183,7 @@ def test_review_revision_replace_all_and_export_contract(tmp_path: Path) -> None
         exported = client.get(f"{job_path}/export.md")
         exported_text = client.get(f"{job_path}/export.txt")
         exported_pdf = client.get(f"{job_path}/export.pdf")
+        exported_latex = client.get(f"{job_path}/export.tex")
 
     assert initial.status_code == 200
     initial_block = initial.json()["pages"][0]["blocks"][0]
@@ -229,6 +232,11 @@ def test_review_revision_replace_all_and_export_contract(tmp_path: Path) -> None
     assert exported_pdf.status_code == 200
     assert exported_pdf.content == b"%PDF-1.7\nreviewed"
     assert exported_pdf.headers["content-type"] == "application/pdf"
+    assert exported_latex.status_code == 200
+    assert exported_latex.text.startswith("\\documentclass")
+    assert exported_latex.headers["content-disposition"].endswith(
+        'filename="reviewed-translation.tex"'
+    )
     assert "old and old" in pdf_compiler.sources[0]
     assert "olde and olde" not in pdf_compiler.sources[0]
 
@@ -253,6 +261,42 @@ def test_pdf_export_failure_is_redacted(tmp_path: Path) -> None:
     assert response.status_code == 503
     assert response.json() == {"detail": "The reviewed PDF could not be generated on this computer"}
     assert "private compiler detail" not in response.text
+
+
+def test_review_api_persists_block_type_and_unowned_footnote_warning(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    FilesystemArtifactRepository(job_dir).write_document(RUN_ID, _document())
+    config = load_project_config(Path("config/default.toml"))
+    config = config.model_copy(
+        update={"paths": config.paths.model_copy(update={"artifacts_dir": tmp_path / "artifacts"})}
+    )
+    app = create_app(
+        config,
+        job_manager=cast(WebJobManager, ReadyJobManager(job_dir)),
+        secret_store=DotenvSecretStore(tmp_path / ".env"),
+    )
+
+    with TestClient(app) as client:
+        client.get("/")
+        revised = client.post(
+            f"/api/jobs/{'b' * 32}/revisions",
+            json={
+                "block_id": BLOCK_ID,
+                "editorial_text": "Converted note",
+                "type": "footnote",
+                "footnote_owner_block_id": None,
+                "expected_base_revision": 0,
+                "status": "in_review",
+            },
+            headers={"X-CSRF-Token": client.cookies["at_csrf"]},
+        )
+
+    assert revised.status_code == 200
+    block = revised.json()["pages"][0]["blocks"][0]
+    assert block["machine_type"] == "body"
+    assert block["type"] == "footnote"
+    assert block["footnote_owner_block_id"] is None
+    assert block["footnote_owner_review_required"] is True
 
 
 def test_review_page_image_and_position_are_scoped_and_persisted(tmp_path: Path) -> None:
@@ -390,6 +434,7 @@ def test_manual_insertion_metadata_and_revision_flow_through_review_api(
             json={
                 "block_id": BLOCK_ID,
                 "editorial_text": reviewer_table,
+                "type": "table",
                 "expected_base_revision": 0,
                 "status": "accepted",
             },
@@ -403,6 +448,7 @@ def test_manual_insertion_metadata_and_revision_flow_through_review_api(
         "block_id": BLOCK_ID,
         "original_page_number": 1,
         "order": 1,
+        "machine_type": "table",
         "type": "table",
         "segment_handling": "manual_insertion",
         "source_text": None,
@@ -410,6 +456,9 @@ def test_manual_insertion_metadata_and_revision_flow_through_review_api(
         "effective_text": "",
         "manual_insertion_reason": "table_like",
         "footnote_marker": None,
+        "footnote_owner_block_id": None,
+        "footnote_anchor_offset": None,
+        "footnote_owner_review_required": False,
         "continuation": "to_next_page",
         "paragraph_continuation": None,
         "continues_from_block_id": None,

@@ -131,6 +131,70 @@
             </div>
             <p id="language-error" class="field-error" hidden></p>
 
+            <section class="job-settings" aria-labelledby="job-settings-heading">
+              <div class="job-settings-heading">
+                <div>
+                  <h2 id="job-settings-heading">Job settings</h2>
+                  <p>Defaults come from the selected local configuration.</p>
+                </div>
+              </div>
+              <div class="job-settings-grid">
+                <label class="field-label" for="job-model-select">
+                  Gemini model
+                  <select id="job-model-select" data-testid="job-model-select"></select>
+                </label>
+                <label class="field-label" for="job-translation-style">
+                  Translation style
+                  <select id="job-translation-style" data-testid="job-translation-style">
+                    <option value="faithful">Faithful</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="readable">Readable</option>
+                  </select>
+                </label>
+                <label class="field-label" for="previous-page-context-count">
+                  Previous-page text context
+                  <input
+                    id="previous-page-context-count"
+                    data-testid="previous-page-context-count"
+                    type="number"
+                    min="0"
+                    max="10"
+                    step="1"
+                    required
+                  >
+                  <small>Finalized translated pages supplied for continuity; no prior images.</small>
+                </label>
+                <label class="field-label" for="page-image-dpi">
+                  Page image resolution (DPI)
+                  <input
+                    id="page-image-dpi"
+                    data-testid="page-image-dpi"
+                    type="number"
+                    min="72"
+                    max="600"
+                    step="1"
+                    required
+                  >
+                  <small>Resolution used to render the current PDF page for Gemini and review.</small>
+                </label>
+                <label class="checkbox-field job-toggle" for="auto-continue">
+                  <input
+                    id="auto-continue"
+                    data-testid="auto-continue"
+                    type="checkbox"
+                    role="switch"
+                  >
+                  <span>
+                    Auto continue
+                    <small id="auto-continue-help">
+                      Automatically retry a failed page before stopping for review.
+                    </small>
+                  </span>
+                </label>
+              </div>
+              <p id="job-settings-error" class="field-error" hidden></p>
+            </section>
+
             <div class="form-footer">
               <p class="privacy-note" id="privacy-note">
                 The configured provider receives the current page image and extracted
@@ -179,7 +243,31 @@
             <span id="progress-pages">Waiting for page count</span>
           </div>
           <div id="progress-error-actions" class="progress-actions" hidden>
-            <button id="back-to-setup" class="secondary-button" type="button">
+            <p id="progress-retention-note" class="progress-retention-note">
+              Completed pages are saved. Continue retries the stopped page in the same run.
+            </p>
+            <button
+              id="continue-job"
+              class="primary-button"
+              type="button"
+              data-action="continue-job"
+            >
+              Continue
+            </button>
+            <button
+              id="cancel-job"
+              class="secondary-button"
+              type="button"
+              data-action="cancel-job"
+            >
+              Cancel
+            </button>
+            <button
+              id="back-to-setup"
+              class="secondary-button"
+              type="button"
+              data-action="new-translation"
+            >
               Choose another PDF
             </button>
           </div>
@@ -355,6 +443,7 @@
                 <summary class="secondary-button compact-control">Export</summary>
                 <div class="export-menu-options" aria-label="Export article">
                   <a id="export-pdf-link" href="#" download>LaTeX PDF (.pdf)</a>
+                  <a id="export-latex-link" href="#" download>LaTeX source (.tex)</a>
                   <a id="export-markdown-link" href="#" download>Markdown (.md)</a>
                   <a id="export-text-link" href="#" download>Plain text (.txt)</a>
                 </div>

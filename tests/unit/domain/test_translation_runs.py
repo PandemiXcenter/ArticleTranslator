@@ -43,13 +43,26 @@ def _manifest(**updates: object) -> JobManifest:
 
 
 def test_manifest_round_trips_ordered_translation_run_index() -> None:
-    manifest = _manifest()
+    manifest = _manifest(auto_continue=True, auto_continue_attempts=3)
 
     restored = JobManifest.model_validate_json(manifest.model_dump_json())
 
     assert restored.translation_run_id == RUN_ID
     assert restored.translation_run_ids == [RUN_ID]
-    assert restored.schema_version == "4.0"
+    assert restored.schema_version == "5.0"
+    assert restored.auto_continue is True
+    assert restored.auto_continue_attempts == 3
+
+
+def test_manifest_defaults_auto_continue_for_older_schema_five_artifacts() -> None:
+    payload = _manifest().model_dump(mode="json")
+    payload.pop("auto_continue")
+    payload.pop("auto_continue_attempts")
+
+    restored = JobManifest.model_validate(payload)
+
+    assert restored.auto_continue is False
+    assert restored.auto_continue_attempts == 1
 
 
 def test_manifest_rejects_active_run_outside_ordered_index() -> None:

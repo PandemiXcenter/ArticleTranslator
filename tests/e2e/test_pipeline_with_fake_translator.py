@@ -47,7 +47,7 @@ class FakeExtractor:
         *,
         image_dpi: int,
     ) -> list[PreparedPage]:
-        del source_pdf, image_dpi
+        del source_pdf
         pages: list[PreparedPage] = []
         for number in (1, 2):
             page_dir = artifact_root / "pages" / f"{number:04d}"
@@ -55,7 +55,7 @@ class FakeExtractor:
             markdown_path = page_dir / "source.md"
             image_path = page_dir / "page.png"
             markdown_path.write_text(f"Source page {number}", encoding="utf-8")
-            image_path.write_bytes(f"image-{number}".encode())
+            image_path.write_bytes(f"image-{number}-dpi-{image_dpi}".encode())
             pages.append(
                 PreparedPage(
                     original_page_number=number,
@@ -141,6 +141,36 @@ class ParagraphContinuityTranslator(FakeTranslator):
                         translated_text=translated_text,
                         paragraph_continuation=continuation,
                     )
+                ]
+            )
+        )
+
+
+class FootnoteOwnerTranslator(FakeTranslator):
+    def translate_page(self, request: PageTranslationRequest) -> ProviderResult:
+        self.calls.append(request.original_page_number)
+        if request.original_page_number == 2:
+            return super().translate_page(request)
+        return ProviderResult(
+            payload=GeneratedPagePayload(
+                blocks=[
+                    GeneratedBlock(
+                        order=1,
+                        type=BlockType.BODY,
+                        source_text="Text* continues.",
+                        translated_text="Text[[FOOTNOTE_1]] continues.",
+                        paragraph_continuation=SegmentContinuation.COMPLETE,
+                    ),
+                    GeneratedFootnoteBlock(
+                        order=2,
+                        type=BlockType.FOOTNOTE,
+                        source_text="Note text.",
+                        translated_text="Translated note.",
+                        footnote_marker="*",
+                        owner_reference_token="[[FOOTNOTE_1]]",
+                        owner_review_required=False,
+                        continuation=SegmentContinuation.COMPLETE,
+                    ),
                 ]
             )
         )
@@ -232,6 +262,8 @@ class SegmentingTranslator:
                         source_text="Fortsat note",
                         translated_text="Continued note",
                         footnote_marker=None,
+                        owner_reference_token=None,
+                        owner_review_required=True,
                         continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
                     )
                 ]
@@ -320,7 +352,7 @@ def test_full_pipeline_is_resumable_and_config_invalidates_cache(tmp_path: Path)
         settings=settings,
         translator=translator,
     )
-    markdown_path = pipeline.compile_document(
+    latex_path = pipeline.compile_document(
         job_dir,
         settings=MarkdownExportSettings(),
     )
@@ -330,9 +362,10 @@ def test_full_pipeline_is_resumable_and_config_invalidates_cache(tmp_path: Path)
     assert all(page.translation_run_id == document.translation_run_id for page in document.pages)
     assert document.pages[0].extraction_status is ExtractionStatus.EXTRACTED
     assert document.pages[0].source_markdown_artifact.path.startswith("prepared/")
-    assert markdown_path == (
-        job_dir / "runs" / document.translation_run_id / "output" / "document.md"
+    assert latex_path == (
+        job_dir / "runs" / document.translation_run_id / "output" / "document.tex"
     )
+    markdown_path = job_dir / "runs" / document.translation_run_id / "output" / "document.md"
     assert markdown_path.read_text(encoding="utf-8").endswith("Translated page 2\n")
 
     pipeline.translate_document(job_dir, settings=settings, translator=translator)
@@ -406,11 +439,33 @@ def test_pipeline_links_next_page_confirmed_paragraph_continuation(tmp_path: Pat
     assert second.continues_from_block_id == first.block_id
     assert '"paragraph_continuation": "to_next_page"' in translator.prompts[2]
 
-    output = pipeline.compile_document(job_dir, settings=MarkdownExportSettings())
+    pipeline.compile_document(job_dir, settings=MarkdownExportSettings())
+    output = job_dir / "runs" / document.translation_run_id / "output" / "document.md"
     assert (
         "The paragraph begins <!-- original-page: 2; continues-from: p0001-b0001 --> "
         "and ends on page two."
     ) in output.read_text(encoding="utf-8")
+
+
+def test_pipeline_converts_provider_footnote_token_to_trusted_inline_anchor(
+    tmp_path: Path,
+) -> None:
+    pipeline, job_dir = _prepared_job(tmp_path)
+    document = pipeline.translate_document(
+        job_dir,
+        settings=TranslationSettings(),
+        translator=FootnoteOwnerTranslator(),
+    )
+    owner, footnote = document.pages[0].blocks
+
+    assert owner.translated_text == "Text continues."
+    assert "[[FOOTNOTE_" not in owner.translated_text
+    assert footnote.footnote_owner_block_id == owner.block_id
+    assert footnote.footnote_anchor_offset == 4
+    assert footnote.footnote_owner_review_required is False
+
+    latex_path = pipeline.compile_document(job_dir, settings=MarkdownExportSettings())
+    assert "Text\\footnote{Translated note.} continues." in latex_path.read_text(encoding="utf-8")
 
 
 def test_pipeline_maps_provider_variants_to_trusted_compatible_blocks(tmp_path: Path) -> None:
@@ -599,7 +654,7 @@ def test_forced_translations_create_coexisting_immutable_runs(tmp_path: Path) ->
         translator=translator,
         force=True,
     )
-    first_markdown = pipeline.compile_document(
+    first_latex = pipeline.compile_document(
         job_dir,
         settings=MarkdownExportSettings(),
     )
@@ -609,7 +664,7 @@ def test_forced_translations_create_coexisting_immutable_runs(tmp_path: Path) ->
     )
     first_document_bytes = first_document_path.read_bytes()
     first_page_bytes = first_page_path.read_bytes()
-    first_markdown_bytes = first_markdown.read_bytes()
+    first_latex_bytes = first_latex.read_bytes()
 
     second = pipeline.translate_document(
         job_dir,
@@ -617,7 +672,7 @@ def test_forced_translations_create_coexisting_immutable_runs(tmp_path: Path) ->
         translator=translator,
         force=True,
     )
-    second_markdown = pipeline.compile_document(
+    second_latex = pipeline.compile_document(
         job_dir,
         settings=MarkdownExportSettings(),
     )
@@ -632,9 +687,9 @@ def test_forced_translations_create_coexisting_immutable_runs(tmp_path: Path) ->
     assert repository.read_document(second.translation_run_id) == second
     assert first_document_path.read_bytes() == first_document_bytes
     assert first_page_path.read_bytes() == first_page_bytes
-    assert first_markdown.read_bytes() == first_markdown_bytes
-    assert second_markdown == (
-        job_dir / "runs" / second.translation_run_id / "output" / "document.md"
+    assert first_latex.read_bytes() == first_latex_bytes
+    assert second_latex == (
+        job_dir / "runs" / second.translation_run_id / "output" / "document.tex"
     )
 
 
@@ -716,6 +771,53 @@ def test_forced_preparation_preserves_run_index_and_starts_a_new_active_run(
     assert FilesystemArtifactRepository(job_dir).read_manifest().translation_run_ids == [
         original_run_id,
         rebound.translation_run_id,
+    ]
+
+
+def test_changed_image_dpi_automatically_reprepares_and_starts_a_new_run(
+    tmp_path: Path,
+) -> None:
+    pipeline, job_dir = _prepared_job(tmp_path)
+    source = tmp_path / "source.pdf"
+    settings = TranslationSettings()
+    original = pipeline.translate_document(
+        job_dir,
+        settings=settings,
+        translator=FakeTranslator(),
+    )
+    repository = FilesystemArtifactRepository(job_dir)
+    original_manifest = repository.read_manifest()
+    original_image_hashes = [page.image.sha256 for page in original_manifest.pages]
+
+    returned_job_dir = pipeline.prepare_document(
+        source,
+        artifacts_dir=tmp_path / "artifacts",
+        image_dpi=225,
+    )
+    prepared_manifest = repository.read_manifest()
+
+    assert returned_job_dir == job_dir
+    assert prepared_manifest.image_dpi == 225
+    assert prepared_manifest.preparation_id != original_manifest.preparation_id
+    assert prepared_manifest.translation_run_id is None
+    assert prepared_manifest.translation_run_ids == [original.translation_run_id]
+    assert [page.image.sha256 for page in prepared_manifest.pages] != original_image_hashes
+    assert [page.markdown.sha256 for page in prepared_manifest.pages] == [
+        page.markdown.sha256 for page in original_manifest.pages
+    ]
+
+    translator = FakeTranslator()
+    rerun = pipeline.translate_document(
+        job_dir,
+        settings=settings,
+        translator=translator,
+    )
+
+    assert rerun.translation_run_id != original.translation_run_id
+    assert translator.calls == [1, 2]
+    assert repository.read_manifest().translation_run_ids == [
+        original.translation_run_id,
+        rerun.translation_run_id,
     ]
 
 

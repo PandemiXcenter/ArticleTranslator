@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -123,6 +124,21 @@ class FilesystemArtifactRepository:
         self._atomic_write(path, markdown)
         return path
 
+    def write_latex(self, translation_run_id: str, latex: str) -> Path:
+        path = self._latex_path(translation_run_id)
+        self._atomic_write(path, latex)
+        return path
+
+    def delete_translation_run(self, translation_run_id: str) -> None:
+        """Delete one explicitly identified run without touching sibling runs."""
+
+        run_root = self._run_root(translation_run_id)
+        if run_root.is_symlink():
+            raise ArtifactError("Translation run directory cannot be a symbolic link")
+        if not run_root.is_dir():
+            raise ArtifactError("Translation run artifacts were not found")
+        shutil.rmtree(run_root)
+
     def list_block_revisions(
         self,
         document_id: str,
@@ -203,6 +219,9 @@ class FilesystemArtifactRepository:
     def _markdown_path(self, translation_run_id: str) -> Path:
         return self._run_root(translation_run_id) / "output" / "document.md"
 
+    def _latex_path(self, translation_run_id: str) -> Path:
+        return self._run_root(translation_run_id) / "output" / "document.tex"
+
     def _translation_path(self, translation_run_id: str, page_number: int) -> Path:
         if page_number < 1:
             raise ArtifactError("Page number must be positive")
@@ -244,9 +263,13 @@ class FilesystemArtifactRepository:
         if not isinstance(payload, dict):
             return payload
         if payload.get("schema_version") == "2.0":
-            return cls._migrate_v3_payload(cls._migrate_v2_payload(payload))
+            return cls._migrate_v4_payload(
+                cls._migrate_v3_payload(cls._migrate_v2_payload(payload))
+            )
         if payload.get("schema_version") == "3.0":
-            return cls._migrate_v3_payload(payload)
+            return cls._migrate_v4_payload(cls._migrate_v3_payload(payload))
+        if payload.get("schema_version") == "4.0":
+            return cls._migrate_v4_payload(payload)
         return payload
 
     @classmethod
@@ -282,6 +305,42 @@ class FilesystemArtifactRepository:
                 cls._migrate_v3_payload(page) if isinstance(page, dict) else page for page in pages
             ]
         return migrated
+
+    @classmethod
+    def _migrate_v4_payload(cls, payload: dict[str, object]) -> dict[str, object]:
+        migrated = dict(payload)
+        migrated["schema_version"] = "5.0"
+
+        if "blocks" in migrated:
+            migrated["blocks"] = cls._migrate_v4_blocks(migrated["blocks"])
+
+        pages = migrated.get("pages")
+        if isinstance(pages, list) and any(
+            isinstance(page, dict) and "schema_version" in page for page in pages
+        ):
+            migrated["pages"] = [
+                cls._migrate_v4_payload(page) if isinstance(page, dict) else page for page in pages
+            ]
+        return migrated
+
+    @staticmethod
+    def _migrate_v4_blocks(blocks: object) -> object:
+        if not isinstance(blocks, list):
+            return blocks
+        migrated_blocks: list[object] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                migrated_blocks.append(block)
+                continue
+            migrated_block = dict(block)
+            migrated_block.setdefault("footnote_owner_block_id", None)
+            migrated_block.setdefault("footnote_anchor_offset", None)
+            migrated_block.setdefault(
+                "footnote_owner_review_required",
+                migrated_block.get("type") == "footnote",
+            )
+            migrated_blocks.append(migrated_block)
+        return migrated_blocks
 
     @staticmethod
     def _migrate_v3_blocks(blocks: object) -> object:

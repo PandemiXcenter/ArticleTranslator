@@ -4,13 +4,15 @@ ArticleTranslator is a local tool for translating and reviewing page-preserving
 PDFs. It turns each physical page into matched Markdown and an image, sends a
 structured multimodal page-translation request, conditionally follows it with a
 dedicated table-reconstruction request, validates both responses with Pydantic,
-and compiles the canonical dataset into clean Markdown.
+and compiles the canonical dataset into XeLaTeX source, with Markdown retained as
+an additional deterministic projection.
 
 The repository includes the backend pipeline, CLI, and a small tabbed FastAPI
 interface for colleagues. The interface provides PDF upload, per-job language
 selection, authoritative term mappings, Gemini settings, side-by-side review,
-append-only corrections, qualitative uncertainty review, and reviewed Markdown,
-plain-text, and locally typeset PDF downloads. It is a loopback-only workstation
+append-only corrections, qualitative uncertainty review, footnote ownership and
+marker editing, and reviewed LaTeX, PDF, Markdown, and plain-text downloads. It is
+a loopback-only workstation
 tool, not a remotely deployed or
 multi-user application.
 
@@ -24,7 +26,8 @@ PDF
   -> when tagged: one batched table-reconstruction request for that page
   -> strict structured-output validation and per-pass trusted provenance
   -> canonical runs/<translation-run-id>/output/document.json
-  -> clean runs/<translation-run-id>/output/document.md
+  -> primary compiled runs/<translation-run-id>/output/document.tex
+  -> additional runs/<translation-run-id>/output/document.md projection
 ```
 
 MarkItDown does not retain usable page boundaries when converting a complete PDF.
@@ -60,10 +63,16 @@ identity. The table remains ordinary inline GFM rather than a floating object.
 
 Footnotes are classified by function, not by font size, position, or share of the
 page. A note may be a short marked passage below a rule, an unmarked continuation,
-or nearly a whole page. Footnote blocks retain an optional printed marker and an
-explicit page-continuation state, and their text is translated. Running heads,
-page numbers, digitizer marks, catchwords, and printer gathering signatures are
-not footnotes.
+or nearly a whole page. For a newly starting note, the model puts a page-local
+`[[FOOTNOTE_N]]` control token at the exact translated-text reference point and
+returns that token from the footnote block. The pipeline removes the token and
+stores the trusted owner block ID plus its Unicode character offset. LaTeX export
+then emits a real `\footnote{...}` at that point; Markdown emits a reference and
+definition. If the visible evidence does not establish an owner, the footnote is
+retained with an explicit owner-review flag and rendered separately until a
+reviewer assigns it. Footnote blocks also retain an optional printed marker and
+page-continuation state. Running heads, page numbers, digitizer marks, catchwords,
+and printer gathering signatures are not footnotes.
 
 ### Previous-page continuity context
 
@@ -85,7 +94,7 @@ inline at the join. This cannot retroactively rewrite the preceding fragment.
 
 The same context can resolve a word, sentence, heading, footnote, or table
 continuation that enters the current page. The main contract is versioned as
-`translate-page-v5`; the table contract is `reconstruct-tables-v1`.
+`translate-page-v6`; the table contract is `reconstruct-tables-v1`.
 
 ## Quick start: local interface
 
@@ -107,8 +116,15 @@ uv run app
 Open `http://127.0.0.1:8000` unless the selected TOML file configures another
 loopback host or port. The interface is organized as an internal workbench:
 
-- **Translate** selects a laptop PDF and the input/output languages. The fields
-  start from TOML defaults; the checked-in defaults are Danish to English.
+- **Translate** selects a laptop PDF and shows the complete per-job choices before
+  submission: input/output languages, Gemini model, translation style, finalized
+  previous-page text context, and current-page image DPI. The fields start from
+  TOML defaults; the checked-in language direction is Danish to English.
+  **Auto continue** can be switched on or off before submission. When enabled,
+  it retries a failed page within the same run up to the TOML-configured limit.
+  If a page remains failed, every earlier page checkpoint is retained:
+  **Continue** validates and reuses them before another attempt, while **Cancel**
+  pauses the screen without deleting those artifacts.
 - **Term mappings** lets you define authoritative source-term to target-term
   mappings for the next job. These are added to the configured glossary and sent
   with each page prompt.
@@ -126,9 +142,13 @@ loopback host or port. The interface is organized as an internal workbench:
   Uncertain terms are visibly marked and can be corrected once or, when multiple
   unresolved model-annotated occurrences exist, all at once. **Uncertain terms**
   opens a complete unresolved list ordered from most to least occurrences and
-  can jump to the first marked instance. An unfinished article offers **Review**;
-  a fully accepted article offers **Read**. The export menu downloads Markdown,
-  plain text, or a PDF typeset locally with XeLaTeX.
+  can jump to the first marked instance. Each translated section has an editable
+  type; footnotes additionally expose an owner-section selector and exact inline
+  marker character position. An unfinished article offers **Review**;
+  a fully accepted article offers **Read**. The export menu downloads XeLaTeX
+  source, Markdown, plain text, or a PDF typeset locally with XeLaTeX. **Delete**
+  removes the selected immutable translation run together with its revisions and
+  review position; sibling runs for the same source document are preserved.
 
 PDF export requires the `xelatex` executable configured under `[pdf_export]`.
 Markdown and plain-text downloads do not require TeX. PDF source is projected
@@ -143,13 +163,15 @@ files, canonical translations, and editorial revisions remain in the configured
 local artifact directory.
 
 The web server binds only to a configured loopback address. A newly submitted
-translation receives a temporary browser job ID; that alias, its progress record,
-and the bounded execution queue exist only in the running process. Completed
-runs are different: the server discovers their canonical artifacts at startup
-and exposes them by stable translation-run ID in Articles. This is filesystem
-discovery, not a database or durable task queue. There is no authentication,
-remote deployment support, or cancellation, so do not expose the server on a
-network.
+translation receives a temporary browser job ID; that alias, live progress
+record, and the bounded execution queue exist only in the running process.
+Completed runs and stopped failed runs are different: the server discovers their
+artifacts at startup and exposes them by stable translation-run ID. A failed run
+can therefore continue after refresh or restart, but no work proceeds while the
+server is stopped. **Cancel** dismisses an already stopped run; it is not active
+task interruption. This is filesystem discovery, not a database or durable task
+queue. There is no authentication or remote deployment support, so do not expose
+the server on a network.
 
 ## CLI workflow
 
@@ -182,7 +204,10 @@ uv run article-translator \
 
 A 95-page PDF makes 95 primary provider requests plus one table request for each
 table-bearing page, unless matching checkpoints already exist. Multiple tables
-on one page are batched into that page's single follow-up.
+on one page are batched into that page's single follow-up. With Auto continue
+enabled, a failed page can make up to `web.auto_continue_attempts` additional
+requests. The checked-in default is one automatic attempt and the UI default is
+off.
 
 ## Staged commands
 
@@ -197,7 +222,7 @@ uv run article-translator --config config/personal.local.toml \
 uv run article-translator --config config/personal.local.toml \
   translate <configured-artifacts-dir>/<job-id>
 
-# No external API call; regenerates Markdown from canonical JSON
+# No external API call; regenerates LaTeX and Markdown from canonical JSON
 uv run article-translator --config config/personal.local.toml \
   compile <configured-artifacts-dir>/<job-id>
 ```
@@ -205,7 +230,9 @@ uv run article-translator --config config/personal.local.toml \
 Use `--force` on `ingest`, `translate`, or `run` when intentionally starting from
 new prepared inputs or a new immutable translation run. Without it, a checkpoint
 produced with different page content, prompt, model, or translation config fails
-visibly instead of being reused.
+visibly instead of being reused. A changed configured image DPI is handled
+automatically: ingestion publishes newly rendered page artifacts and clears the
+active run so translation starts a new immutable run using the new image hashes.
 
 ## Configuration
 
@@ -232,10 +259,10 @@ translation, provider, and export settings are stored in the job manifest; API
 keys are never stored there.
 
 The interface uses TOML values as defaults and limits. Input language, output
-language, model, translation style, and term mappings are explicit per-job
-selections; the resolved values are passed through the same application boundary
-and persisted as run provenance. A model can be selected only when it appears in
-`provider.gemini.selectable_models`.
+language, model, translation style, previous-page text context, page-image DPI,
+and term mappings are explicit per-job selections; the resolved values are passed
+through the same application boundary and persisted as run provenance. A model can
+be selected only when it appears in `provider.gemini.selectable_models`.
 
 `.env` is exclusively for `GEMINI_API_KEY`. Do not add model names, paths,
 translation choices, or other non-secret behavior to environment variables. The
@@ -250,7 +277,8 @@ The active run's `document.json` is the source of truth for the editor. It
 preserves the translation-run identity, source page, block type, source text for
 translated regions, machine translation or reconstructed table Markdown,
 uncertainty notes, hashes, prompt/model provenance, and translation settings.
-`document.md` is a derived presentation and can be regenerated at any time.
+`document.tex` is the primary compiled source. `document.md` is an additional
+derived presentation; both can be regenerated at any time.
 
 ```text
 <configured-artifacts-dir>/<job-id>/
@@ -279,7 +307,8 @@ uncertainty notes, hashes, prompt/model provenance, and translation settings.
     │   │   └── position.json      # mutable last physical page visited
     │   └── output/
     │       ├── document.json      # canonical machine dataset for this run
-    │       └── document.md        # clean derived export for this run
+    │       ├── document.tex       # primary compiled XeLaTeX source
+    │       └── document.md        # additional derived export
     └── <older-translation-run-id>/
         └── ...                    # retained immutable machine artifacts
 ```
@@ -309,14 +338,19 @@ settings remain provenance but do not invalidate successful checkpoints.
 
 Editorial changes are separate from machine output. Each block revision is
 created atomically under the active immutable run and includes its expected base
-revision, effective text, review state, and resolved uncertainty IDs. The review
-projection combines machine blocks with the latest valid revision. Downloading
-reviewed Markdown projects that effective view without changing either canonical
-`document.json` or the machine `document.md`. The interface labels whether each
+revision, effective text, effective section type, optional footnote owner and
+marker offset, review state, and resolved uncertainty IDs. The review projection
+combines machine blocks with the latest valid revision. Downloading a reviewed
+format projects that effective view without changing the canonical
+`document.json` or either machine projection. The interface labels whether each
 effective block is still the machine translation, was reviewed unchanged, or is
 the result of a manual revision. The run-scoped `review/position.json` sidecar
 stores only the current physical-page cursor; it does not alter the translation
 or revision history.
+
+New revisions use revision schema 2.0 for effective section type and footnote
+placement. Existing revision schema 1.0 text edits remain readable and inherit
+their immutable machine block metadata.
 
 Preparation is transactional: extraction uses an immutable temporary snapshot of
 the source and publishes a new `<preparation-id>` only after every page pair is
@@ -325,13 +359,15 @@ preparations are retained until a future explicit cleanup policy exists. Forced
 preparation preserves the ordered translation-run index but clears the active run
 so the next translation receives a new identity.
 
-New core artifacts use schema version 4.0 for table-reconstruction handling and
-per-pass provenance. The filesystem reader validates and upgrades supported
-schema 2.0 and 3.0 artifacts in memory without rewriting immutable files. Schema
+New core artifacts use schema version 5.0 for structured footnote ownership in
+addition to table-reconstruction handling and per-pass provenance. The filesystem
+reader validates and upgrades supported schema 2.0, 3.0, and 4.0 artifacts in
+memory without rewriting immutable files. Schema
 2.0 translated tables remain explicitly marked legacy translated tables; schema
 3.0 manual table placeholders remain explicitly marked legacy manual tables.
-Neither compatibility form is silently reinterpreted as a schema 4.0
-reconstruction. A translated figure is not valid schema 2.0 legacy data. Version
+Neither compatibility form is silently reinterpreted as a reconstructed table.
+Migrated schema 2–4 footnotes have unknown ownership and require review. A
+translated figure is not valid schema 2.0 legacy data. Version
 1.0 artifacts predate translation-run identity and remain explicitly rejected
 rather than being attached to a guessed run.
 
@@ -419,12 +455,13 @@ The live Gemini path has not been verified by the automated suite.
 - Markdown preserves logical content and provenance, not exact PDF layout.
 - `--force` starts a new immutable translation run; it never overwrites an older
   run's machine checkpoints.
-- In-progress browser job aliases, progress state, and the bounded queue are
+- Queued/running browser aliases, live progress state, and the bounded queue are
   process-local and are lost on restart. Valid completed runs remain available
-  through the filesystem-backed Articles catalog and their stable run IDs.
+  through Articles, and failed active manifests are rediscovered for explicit
+  continuation from their stable run IDs.
 - The interface has no authentication, remote deployment configuration, durable
-  task queue, multi-process coordination, or job cancellation. It is deliberately
-  restricted to loopback use.
+  task queue, multi-process coordination, or interruption of an active request.
+  It is deliberately restricted to loopback use.
 - Review currently edits whole block text and review status. Block split/merge,
   type correction, editor identities, and a dedicated revision-history screen
   remain deferred.

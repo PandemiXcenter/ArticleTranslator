@@ -63,3 +63,7 @@ max_pdf_pages = 500
 max_glossary_entries = 500
 max_term_characters = 500
 status_poll_interval_ms = 1000
+# Retry a stopped page automatically for new web jobs. The UI can override the default.
+auto_continue_default = false
+# Bound provider cost when Auto continue is enabled.
+auto_continue_attempts = 1

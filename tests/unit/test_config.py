@@ -31,6 +31,8 @@ def test_default_toml_is_the_complete_non_secret_configuration() -> None:
     assert config.web.host == "127.0.0.1"
     assert config.web.max_concurrent_jobs == 1
     assert config.web.max_pdf_pages == 500
+    assert config.web.auto_continue_default is False
+    assert config.web.auto_continue_attempts == 1
 
 
 def test_unknown_config_keys_fail_fast(tmp_path: Path) -> None:
@@ -138,3 +140,22 @@ def test_web_server_rejects_non_loopback_host(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigurationError, match=r"web\.host"):
         load_project_config(path)
+
+
+def test_auto_continue_config_is_required_and_bounded(tmp_path: Path) -> None:
+    source = Path("config/default.toml").read_text(encoding="utf-8")
+    missing = tmp_path / "missing-auto-continue.toml"
+    missing.write_text(
+        source.replace("auto_continue_default = false\n", ""),
+        encoding="utf-8",
+    )
+    invalid = tmp_path / "invalid-auto-continue-attempts.toml"
+    invalid.write_text(
+        source.replace("auto_continue_attempts = 1", "auto_continue_attempts = 11"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="auto_continue_default"):
+        load_project_config(missing)
+    with pytest.raises(ConfigurationError, match="less than or equal to 10"):
+        load_project_config(invalid)

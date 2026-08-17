@@ -271,6 +271,7 @@ def test_persisted_page_rejects_paragraph_continuation_away_from_flow_edge() -> 
         source_text="Fortsat note",
         translated_text="Continued note",
         footnote_marker=None,
+        footnote_owner_review_required=True,
         continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
     )
     with pytest.raises(ValidationError, match="first main-flow block"):
@@ -350,11 +351,64 @@ def test_generated_footnote_requires_explicit_continuation_metadata() -> None:
         source_text="fortsat note",
         translated_text="continued note",
         footnote_marker=None,
+        owner_reference_token=None,
+        owner_review_required=True,
         continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
     )
 
     assert block.footnote_marker is None
     assert block.continuation is SegmentContinuation.FROM_PREVIOUS_PAGE
+
+
+def test_generated_footnote_owner_token_must_resolve_exactly_once() -> None:
+    payload = GeneratedPagePayload(
+        blocks=[
+            GeneratedBlock(
+                order=1,
+                type=BlockType.BODY,
+                source_text="Tekst* fortsætter.",
+                translated_text="Text[[FOOTNOTE_1]] continues.",
+                paragraph_continuation=SegmentContinuation.COMPLETE,
+            ),
+            GeneratedFootnoteBlock(
+                order=2,
+                type=BlockType.FOOTNOTE,
+                source_text="Notetekst.",
+                translated_text="Note text.",
+                footnote_marker="*",
+                owner_reference_token="[[FOOTNOTE_1]]",
+                owner_review_required=False,
+                continuation=SegmentContinuation.COMPLETE,
+            ),
+        ]
+    )
+
+    generated_footnote = payload.blocks[1]
+    assert isinstance(generated_footnote, GeneratedFootnoteBlock)
+    assert generated_footnote.owner_reference_token == "[[FOOTNOTE_1]]"
+    with pytest.raises(ValidationError, match="exactly once"):
+        GeneratedPagePayload(
+            blocks=[
+                payload.blocks[0].model_copy(
+                    update={"translated_text": "Text without a reference."}
+                ),
+                payload.blocks[1],
+            ]
+        )
+    with pytest.raises(ValidationError, match="unowned footnote"):
+        GeneratedPagePayload(
+            blocks=[
+                payload.blocks[0].model_copy(
+                    update={"translated_text": "Text without a reference."}
+                ),
+                payload.blocks[1].model_copy(
+                    update={
+                        "owner_reference_token": None,
+                        "owner_review_required": False,
+                    }
+                ),
+            ]
+        )
 
 
 def test_provider_schema_uses_strict_block_variants() -> None:
@@ -399,6 +453,7 @@ def test_explicit_v2_legacy_table_marker_preserves_translated_table() -> None:
             "type": "footnote",
             "source_text": "Ældre note",
             "translated_text": "Older note",
+            "footnote_owner_review_required": True,
         }
     )
 
@@ -632,6 +687,7 @@ def test_future_revisions_are_scoped_to_an_immutable_translation_run() -> None:
         revision_number=1,
         base_revision=0,
         editorial_text="First edit",
+        effective_type=BlockType.BODY,
     )
     second = first.model_copy(
         update={
@@ -643,6 +699,22 @@ def test_future_revisions_are_scoped_to_an_immutable_translation_run() -> None:
 
     assert first.block_id == second.block_id
     assert first.translation_run_id != second.translation_run_id
+
+
+def test_revision_schema_two_requires_effective_metadata_and_schema_one_rejects_it() -> None:
+    fields = {
+        "revision_id": "revision-1",
+        "document_id": HASH,
+        "translation_run_id": RUN_ID,
+        "block_id": "p0001-b0001",
+        "revision_number": 1,
+        "base_revision": 0,
+        "editorial_text": "Edit",
+    }
+    with pytest.raises(ValidationError, match="require effective block metadata"):
+        BlockRevision(schema_version="2.0", **fields)
+    with pytest.raises(ValidationError, match="cannot contain effective block metadata"):
+        BlockRevision(schema_version="1.0", effective_type=BlockType.BODY, **fields)
 
 
 def test_future_revision_requires_run_scope_and_rejects_unknown_fields() -> None:

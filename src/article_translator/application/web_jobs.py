@@ -18,8 +18,14 @@ from article_translator.application.editorial import EditorialService
 from article_translator.application.pipeline import TranslationPipeline
 from article_translator.application.prompting import PROMPT_VERSION, TABLE_PROMPT_VERSION
 from article_translator.config import ProjectConfig
+from article_translator.domain.enums import JobStatus
 from article_translator.domain.errors import ArticleTranslatorError, ArtifactError
-from article_translator.domain.models import DocumentTranslation, JobManifest, TranslationSettings
+from article_translator.domain.models import (
+    DocumentTranslation,
+    JobManifest,
+    TranslationSettings,
+    utc_now,
+)
 from article_translator.ports.artifacts import ArtifactRepository
 from article_translator.ports.translation import (
     PageTranslationRequest,
@@ -44,6 +50,7 @@ class WebJobStatus(StrEnum):
     TRANSLATING = "translating"
     READY = "ready"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class WebJobNotFoundError(ArticleTranslatorError):
@@ -85,10 +92,13 @@ class WebReviewSnapshot:
 class _WebJobRecord:
     job_id: str
     filename: str
-    upload_path: Path
+    upload_path: Path | None
     settings: TranslationSettings
     runtime_config: ProjectConfig
     api_key: SecretStr | None
+    auto_continue: bool
+    auto_continue_attempts: int
+    automatic_continuations_remaining: int = 0
     status: WebJobStatus = WebJobStatus.QUEUED
     current_page: int = 0
     total_pages: int | None = None
@@ -149,7 +159,7 @@ _SAFE_JOB_DIRECTORY = re.compile(r"[a-z0-9][a-z0-9-]{0,59}[a-z0-9]")
 
 
 class WebJobManager:
-    """Bounded, process-local translation runner for the local editor."""
+    """Bounded local runner with durable discovery of stopped translation runs."""
 
     def __init__(
         self,
@@ -168,6 +178,7 @@ class WebJobManager:
         self._ambiguous_review_ids: set[str] = set()
         self._records_lock = RLock()
         self._discover_completed_reviews()
+        self._discover_failed_jobs()
         self._executor = ThreadPoolExecutor(
             max_workers=config.web.max_concurrent_jobs,
             thread_name_prefix="article-translator",
@@ -181,8 +192,12 @@ class WebJobManager:
         glossary: dict[str, str],
         runtime_config: ProjectConfig | None = None,
         api_key: SecretStr | None = None,
+        auto_continue: bool | None = None,
     ) -> WebJobSnapshot:
         resolved_config = runtime_config or self._config
+        resolved_auto_continue = (
+            resolved_config.web.auto_continue_default if auto_continue is None else auto_continue
+        )
         resolved_glossary = dict(resolved_config.translation.glossary)
         resolved_glossary.update(glossary)
         settings = TranslationSettings.model_validate(
@@ -198,6 +213,11 @@ class WebJobManager:
             settings=settings,
             runtime_config=resolved_config,
             api_key=api_key,
+            auto_continue=resolved_auto_continue,
+            auto_continue_attempts=resolved_config.web.auto_continue_attempts,
+            automatic_continuations_remaining=(
+                resolved_config.web.auto_continue_attempts if resolved_auto_continue else 0
+            ),
         )
         with self._records_lock:
             self._records[job_id] = record
@@ -242,6 +262,76 @@ class WebJobManager:
             reverse=True,
         )
 
+    def list_recoverable_jobs(self) -> list[WebJobSnapshot]:
+        """List failed or dismissed active runs whose page checkpoints remain on disk."""
+
+        with self._records_lock:
+            records = list(self._records.values())
+        snapshots = [record.snapshot() for record in records]
+        return sorted(
+            (
+                snapshot
+                for snapshot in snapshots
+                if snapshot.status in {WebJobStatus.FAILED, WebJobStatus.CANCELLED}
+                and snapshot.translation_run_id is not None
+            ),
+            key=lambda snapshot: snapshot.translation_run_id or "",
+        )
+
+    def continue_job(
+        self,
+        job_id: str,
+        *,
+        api_key: SecretStr | None = None,
+    ) -> WebJobSnapshot:
+        """Resume the same failed run; successful page checkpoints are validated and reused."""
+
+        _validate_web_identifier(job_id)
+        with self._records_lock:
+            record = self._records.get(job_id)
+        if record is None:
+            raise WebJobNotFoundError("Translation job was not found")
+        with record.lock:
+            if record.status not in {WebJobStatus.FAILED, WebJobStatus.CANCELLED}:
+                raise WebJobNotReadyError("Only a stopped translation can be continued")
+            if record.job_dir is None or record.translation_run_id is None:
+                raise WebJobNotReadyError("The stopped translation has no resumable run")
+            previous_status = record.status
+            previous_error = record.error
+            record.status = WebJobStatus.QUEUED
+            record.error = None
+            record.api_key = api_key
+            record.automatic_continuations_remaining = (
+                record.auto_continue_attempts if record.auto_continue else 0
+            )
+        try:
+            self._executor.submit(self._resume, record)
+        except Exception:
+            with record.lock:
+                record.status = previous_status
+                record.error = previous_error
+                record.api_key = None
+            raise
+        return record.snapshot()
+
+    def cancel_job(self, job_id: str) -> WebJobSnapshot:
+        """Dismiss a stopped attempt without deleting its run or page checkpoints."""
+
+        _validate_web_identifier(job_id)
+        with self._records_lock:
+            record = self._records.get(job_id)
+        if record is None:
+            raise WebJobNotFoundError("Translation job was not found")
+        with record.lock:
+            if record.status is WebJobStatus.CANCELLED:
+                return record.snapshot()
+            if record.status is not WebJobStatus.FAILED:
+                raise WebJobNotReadyError("Only a failed translation can be cancelled")
+            record.status = WebJobStatus.CANCELLED
+            record.error = "Translation paused. Completed page checkpoints were kept."
+            record.api_key = None
+            return record.snapshot()
+
     def ready_context(self, job_id: str) -> tuple[Path, str]:
         _validate_web_identifier(job_id)
         with self._records_lock:
@@ -260,11 +350,71 @@ class WebJobManager:
             return completed.job_dir, completed.translation_run_id
         raise WebJobNotFoundError("Translation job was not found")
 
+    def delete_review(self, translation_run_id: str) -> None:
+        """Delete one completed article run and remove it from the durable run index."""
+
+        _validate_web_identifier(translation_run_id)
+        with self._records_lock:
+            completed = self._completed_reviews.get(translation_run_id)
+        if completed is None:
+            raise WebJobNotFoundError("Translation job was not found")
+
+        repository = self._repository_factory(completed.job_dir)
+        manifest = repository.read_manifest()
+        _validate_completed_document(
+            completed.document,
+            manifest,
+            translation_run_id,
+        )
+        remaining_run_ids = [
+            run_id for run_id in manifest.translation_run_ids if run_id != translation_run_id
+        ]
+        changes: dict[str, object] = {
+            "translation_run_ids": remaining_run_ids,
+            "updated_at": utc_now(),
+        }
+        if manifest.translation_run_id == translation_run_id:
+            changes.update(
+                {
+                    "status": JobStatus.PREPARED,
+                    "translation_run_id": None,
+                    "translation_settings": None,
+                    "provider_name": None,
+                    "provider_model": None,
+                    "provider_configuration": None,
+                    "provider_semantic_configuration": None,
+                    "prompt_version": None,
+                    "table_prompt_version": None,
+                    "export_settings": None,
+                    "auto_continue": False,
+                    "auto_continue_attempts": 1,
+                }
+            )
+        updated_manifest = manifest.model_copy(update=changes)
+        repository.write_manifest(updated_manifest)
+        try:
+            repository.delete_translation_run(translation_run_id)
+        except Exception:
+            repository.write_manifest(manifest)
+            raise
+
+        with self._records_lock:
+            self._completed_reviews.pop(translation_run_id, None)
+            stale_aliases = [
+                job_id
+                for job_id, record in self._records.items()
+                if record.translation_run_id == translation_run_id
+            ]
+            for job_id in stale_aliases:
+                self._records.pop(job_id, None)
+
     def shutdown(self) -> None:
         self._executor.shutdown(wait=True, cancel_futures=False)
 
     def _run(self, record: _WebJobRecord) -> None:
         try:
+            if record.upload_path is None:
+                raise ArtifactError("A new translation requires a staged PDF upload")
             pipeline = self._pipeline_factory()
             self._update(record, status=WebJobStatus.PREPARING)
             job_dir = pipeline.prepare_document(
@@ -279,6 +429,14 @@ class WebJobManager:
                     f"PDF has {manifest.page_count} pages; configured maximum is "
                     f"{record.runtime_config.web.max_pdf_pages}"
                 )
+            manifest = manifest.model_copy(
+                update={
+                    "auto_continue": record.auto_continue,
+                    "auto_continue_attempts": record.auto_continue_attempts,
+                    "updated_at": utc_now(),
+                }
+            )
+            repository.write_manifest(manifest)
             self._update(
                 record,
                 status=WebJobStatus.TRANSLATING,
@@ -323,6 +481,9 @@ class WebJobManager:
                 translation_run_id=document.translation_run_id,
             )
         except Exception as exc:
+            self._capture_failed_run(record)
+            if self._continue_automatically(record):
+                return
             self._update(
                 record,
                 status=WebJobStatus.FAILED,
@@ -331,7 +492,103 @@ class WebJobManager:
         finally:
             with record.lock:
                 record.api_key = None
-            _remove_staged_upload(record.upload_path, self._config.paths.artifacts_dir)
+            if record.upload_path is not None:
+                _remove_staged_upload(record.upload_path, self._config.paths.artifacts_dir)
+
+    def _resume(self, record: _WebJobRecord) -> None:
+        try:
+            if record.job_dir is None or record.translation_run_id is None:
+                raise ArtifactError("The stopped translation has no resumable run")
+            pipeline = self._pipeline_factory()
+            repository = self._repository_factory(record.job_dir)
+            manifest = repository.read_manifest()
+            self._update(record, status=WebJobStatus.TRANSLATING)
+            with self._translator_factory(record.runtime_config, record.api_key) as translator:
+                _validate_resume_inputs(
+                    manifest,
+                    record.translation_run_id,
+                    record.settings,
+                    translator.descriptor,
+                )
+                progress = _ProgressTranslator(
+                    translator,
+                    lambda page: self._update(record, current_page=page),
+                )
+                document = pipeline.translate_document(
+                    record.job_dir,
+                    settings=record.settings,
+                    translator=progress,
+                    force=False,
+                )
+            pipeline.compile_document(
+                record.job_dir,
+                settings=record.runtime_config.export,
+            )
+            self._register_completed_document(record.job_dir, document)
+            self._update(
+                record,
+                status=WebJobStatus.READY,
+                current_page=document.page_count,
+                total_pages=document.page_count,
+                error=None,
+                translation_run_id=document.translation_run_id,
+            )
+        except Exception as exc:
+            self._capture_failed_run(record)
+            if self._continue_automatically(record):
+                return
+            self._update(
+                record,
+                status=WebJobStatus.FAILED,
+                error=_public_error_message(exc),
+            )
+        finally:
+            with record.lock:
+                record.api_key = None
+
+    def _continue_automatically(self, record: _WebJobRecord) -> bool:
+        """Retry a failed page inline without deadlocking the bounded executor."""
+
+        with record.lock:
+            if (
+                not record.auto_continue
+                or record.automatic_continuations_remaining <= 0
+                or record.job_dir is None
+                or record.translation_run_id is None
+            ):
+                return False
+            job_dir = record.job_dir
+        try:
+            manifest = self._repository_factory(job_dir).read_manifest()
+        except (ArticleTranslatorError, OSError, ValueError):
+            return False
+        if (
+            manifest.status is not JobStatus.FAILED
+            or manifest.translation_run_id != record.translation_run_id
+        ):
+            return False
+        with record.lock:
+            if record.automatic_continuations_remaining <= 0:
+                return False
+            record.automatic_continuations_remaining -= 1
+            record.status = WebJobStatus.QUEUED
+            record.error = None
+        self._resume(record)
+        return True
+
+    def _capture_failed_run(self, record: _WebJobRecord) -> None:
+        if record.job_dir is None:
+            return
+        try:
+            manifest = self._repository_factory(record.job_dir).read_manifest()
+        except (ArticleTranslatorError, OSError, ValueError):
+            return
+        if manifest.translation_run_id is not None:
+            self._update(
+                record,
+                translation_run_id=manifest.translation_run_id,
+                total_pages=manifest.page_count,
+            )
 
     def _discover_completed_reviews(self) -> None:
         artifacts_root = self._config.paths.artifacts_dir.resolve()
@@ -359,6 +616,68 @@ class WebJobManager:
                 except (ArticleTranslatorError, OSError, ValueError):
                     continue
                 self._register_completed_document(job_dir, document)
+
+    def _discover_failed_jobs(self) -> None:
+        artifacts_root = self._config.paths.artifacts_dir.resolve()
+        if not artifacts_root.is_dir():
+            return
+        try:
+            candidates = sorted(artifacts_root.iterdir(), key=lambda path: path.name)
+        except OSError:
+            return
+        for candidate in candidates:
+            job_dir = _safe_direct_job_directory(artifacts_root, candidate)
+            if job_dir is None:
+                continue
+            try:
+                repository = self._repository_factory(job_dir)
+                manifest = repository.read_manifest()
+                translation_run_id = manifest.translation_run_id
+                if (
+                    manifest.status is not JobStatus.FAILED
+                    or translation_run_id is None
+                    or manifest.translation_settings is None
+                    or manifest.provider_name != "gemini"
+                    or manifest.provider_model is None
+                ):
+                    continue
+                failure = next(
+                    (
+                        repository.read_page_failure(translation_run_id, page_number)
+                        for page_number in range(1, manifest.page_count + 1)
+                        if repository.has_page_failure(translation_run_id, page_number)
+                    ),
+                    None,
+                )
+                current_page = failure.original_page_number if failure is not None else 1
+                error = (
+                    f"Page {current_page}: {failure.message}"
+                    if failure is not None
+                    else "Translation stopped before the document was complete."
+                )
+                runtime_config = _runtime_config_for_failed_manifest(self._config, manifest)
+            except (ArticleTranslatorError, OSError, ValueError):
+                continue
+            with self._records_lock:
+                self._records.setdefault(
+                    translation_run_id,
+                    _WebJobRecord(
+                        job_id=translation_run_id,
+                        filename=manifest.source_file_name,
+                        upload_path=None,
+                        settings=manifest.translation_settings,
+                        runtime_config=runtime_config,
+                        api_key=None,
+                        auto_continue=manifest.auto_continue,
+                        auto_continue_attempts=manifest.auto_continue_attempts,
+                        status=WebJobStatus.FAILED,
+                        current_page=current_page,
+                        total_pages=manifest.page_count,
+                        error=error,
+                        job_dir=job_dir,
+                        translation_run_id=translation_run_id,
+                    ),
+                )
 
     def _register_completed_document(
         self,
@@ -498,6 +817,57 @@ def _validate_completed_document(
         or translation_run_id not in manifest.translation_run_ids
     ):
         raise ArtifactError("Completed document run is not indexed by its manifest")
+
+
+def _runtime_config_for_failed_manifest(
+    base_config: ProjectConfig,
+    manifest: JobManifest,
+) -> ProjectConfig:
+    """Restore output choices while retaining current operational limits."""
+
+    if manifest.translation_settings is None or manifest.provider_model is None:
+        raise ArtifactError("Failed translation manifest is missing resume settings")
+    translation = base_config.translation.model_copy(
+        update=manifest.translation_settings.model_dump(mode="python")
+    )
+    extraction = base_config.extraction.model_copy(update={"image_dpi": manifest.image_dpi})
+    gemini = base_config.provider.gemini.model_copy(update={"model": manifest.provider_model})
+    provider = base_config.provider.model_copy(update={"gemini": gemini})
+    return base_config.model_copy(
+        update={
+            "translation": translation,
+            "extraction": extraction,
+            "provider": provider,
+        }
+    )
+
+
+def _validate_resume_inputs(
+    manifest: JobManifest,
+    translation_run_id: str,
+    settings: TranslationSettings,
+    descriptor: ProviderDescriptor,
+) -> None:
+    """Refuse to mutate a stopped run when output semantics no longer match."""
+
+    if manifest.status is not JobStatus.FAILED:
+        raise WebJobNotReadyError("The translation run is not stopped at a failed page")
+    if manifest.translation_run_id != translation_run_id:
+        raise ArtifactError("The stopped translation is no longer the active run")
+    if manifest.translation_settings != settings:
+        raise ArtifactError("Resume settings no longer match the stopped translation")
+    if (
+        manifest.provider_name != descriptor.provider
+        or manifest.provider_model != descriptor.model
+        or (manifest.provider_semantic_configuration or {})
+        != dict(descriptor.semantic_configuration)
+        or manifest.prompt_version != PROMPT_VERSION
+        or manifest.table_prompt_version != TABLE_PROMPT_VERSION
+    ):
+        raise ArtifactError(
+            "Provider or prompt semantics changed since this translation stopped; "
+            "the existing run was left unchanged"
+        )
 
 
 def _public_error_message(exc: Exception) -> str:

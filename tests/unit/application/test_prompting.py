@@ -94,6 +94,9 @@ def test_prompt_contains_resolved_settings_and_delimited_page_markdown() -> None
     assert "paragraph_continuation" in prompt
     assert "unfinished-paragraph variable" in prompt
     assert "whether the first body block continues" in prompt
+    assert "[[FOOTNOTE_1]]" in prompt
+    assert "owner_reference_token" in prompt
+    assert "owner_review_required=true" in prompt
     assert "SOURCE_MARKDOWN_START\n# Om Kolera\nSOURCE_MARKDOWN_END" in prompt
 
 

@@ -57,9 +57,12 @@ const progressPages = document.querySelector("#progress-pages");
 const pageProgress = document.querySelector("#page-progress");
 const progressErrorActions = document.querySelector("#progress-error-actions");
 const backToSetupButton = document.querySelector("#back-to-setup");
+const continueJobButton = document.querySelector("#continue-job");
+const cancelJobButton = document.querySelector("#cancel-job");
 const reviewDocument = document.querySelector("#review-document");
 const reviewProgress = document.querySelector("#review-progress");
 const exportPdfLink = document.querySelector("#export-pdf-link");
+const exportLatexLink = document.querySelector("#export-latex-link");
 const exportMarkdownLink = document.querySelector("#export-markdown-link");
 const exportTextLink = document.querySelector("#export-text-link");
 const activePageLabel = document.querySelector("#active-page-label");
@@ -87,6 +90,13 @@ const fallbackInstruction = document.querySelector("#fallback-instruction");
 const sourceLanguageInput = document.querySelector("#source-language");
 const targetLanguageInput = document.querySelector("#target-language");
 const languageError = document.querySelector("#language-error");
+const jobModelSelect = document.querySelector("#job-model-select");
+const jobTranslationStyle = document.querySelector("#job-translation-style");
+const previousPageContextCount = document.querySelector("#previous-page-context-count");
+const pageImageDpi = document.querySelector("#page-image-dpi");
+const autoContinue = document.querySelector("#auto-continue");
+const autoContinueHelp = document.querySelector("#auto-continue-help");
+const jobSettingsError = document.querySelector("#job-settings-error");
 const modelSelect = document.querySelector("#model-select");
 const translationStyle = document.querySelector("#translation-style");
 const geminiApiKey = document.querySelector("#gemini-api-key");
@@ -106,6 +116,22 @@ const READY_STATUSES = new Set([
   "review_ready",
 ]);
 const FAILED_STATUSES = new Set(["failed", "cancelled"]);
+const EDITABLE_BLOCK_TYPES = [
+  "title",
+  "subtitle",
+  "byline",
+  "heading",
+  "body",
+  "list_item",
+  "quote",
+  "caption",
+  "footnote",
+  "page_number",
+  "header",
+  "footer",
+  "equation",
+  "other",
+];
 
 function createElement(tagName, className, text) {
   const element = document.createElement(tagName);
@@ -466,6 +492,7 @@ function populateConfig(config) {
   }
 
   modelSelect.replaceChildren();
+  jobModelSelect.replaceChildren();
   const selectableModels = Array.isArray(provider.selectable_models)
     ? provider.selectable_models
     : [];
@@ -485,11 +512,21 @@ function populateConfig(config) {
     models.unshift({ value: configuredModel, label: configuredModel });
   }
   for (const model of models) {
-    const option = createElement("option", "", model.label);
-    option.value = model.value;
-    option.selected = model.value === configuredModel;
-    modelSelect.append(option);
+    for (const select of [modelSelect, jobModelSelect]) {
+      const option = createElement("option", "", model.label);
+      option.value = model.value;
+      option.selected = model.value === configuredModel;
+      select.append(option);
+    }
   }
+  jobTranslationStyle.value = translationStyle.value;
+  previousPageContextCount.value = asText(translation.previous_page_context_count, "0");
+  pageImageDpi.value = asText(config.extraction?.image_dpi, "150");
+  autoContinue.checked = Boolean(config.automation?.auto_continue_default);
+  const autoContinueAttempts = Number(config.automation?.auto_continue_attempts) || 1;
+  autoContinueHelp.textContent =
+    `Automatically retry a failed page up to ${autoContinueAttempts} ` +
+    `${autoContinueAttempts === 1 ? "time" : "times"} before stopping.`;
 
   updateApiKeyStatus(
     Boolean(config.api_key_configured),
@@ -547,6 +584,22 @@ function validateJobSettings() {
   }
   setInlineError(languageError, "");
 
+  const contextCount = Number(previousPageContextCount.value);
+  const imageDpi = Number(pageImageDpi.value);
+  previousPageContextCount.removeAttribute("aria-invalid");
+  pageImageDpi.removeAttribute("aria-invalid");
+  if (!Number.isInteger(contextCount) || contextCount < 0 || contextCount > 10) {
+    previousPageContextCount.setAttribute("aria-invalid", "true");
+    setInlineError(jobSettingsError, "Previous-page context must be a whole number from 0 to 10.");
+    return null;
+  }
+  if (!Number.isInteger(imageDpi) || imageDpi < 72 || imageDpi > 600) {
+    pageImageDpi.setAttribute("aria-invalid", "true");
+    setInlineError(jobSettingsError, "Page image resolution must be a whole number from 72 to 600 DPI.");
+    return null;
+  }
+  setInlineError(jobSettingsError, "");
+
   const enteredKey = geminiApiKey.value.trim() || state.sessionApiKey;
   const useConfiguredApiKey = !enteredKey && state.apiKeyConfigured;
   if (!enteredKey && !useConfiguredApiKey) {
@@ -558,10 +611,13 @@ function validateJobSettings() {
   setInlineError(apiKeyError, "");
   return {
     settings: {
-      model: modelSelect.value,
+      model: jobModelSelect.value,
       source_language: sourceLanguage,
       target_language: targetLanguage,
-      style: translationStyle.value,
+      style: jobTranslationStyle.value,
+      previous_page_context_count: contextCount,
+      image_dpi: imageDpi,
+      auto_continue: autoContinue.checked,
     },
     sessionKey: useConfiguredApiKey ? "" : enteredKey,
   };
@@ -571,6 +627,7 @@ function setStartBusy(isBusy) {
   startButton.disabled = isBusy;
   addMappingButton.disabled = isBusy;
   fileInput.disabled = isBusy;
+  autoContinue.disabled = isBusy;
   startButtonLabel.textContent = isBusy ? "Uploading PDF…" : "Start translation";
 }
 
@@ -683,9 +740,82 @@ function renderJobProgress(job) {
   pageProgress.value = total ? Math.min(current, total) : 0;
   pageProgress.textContent = total ? `${Math.round((current / total) * 100)}%` : "0%";
   progressPages.textContent = total
-    ? `${Math.min(current, total)} of ${total} pages`
+    ? status === "failed" || status === "cancelled"
+      ? `Stopped on page ${Math.min(current, total)} of ${total} · ${Math.max(
+          0,
+          Math.min(current - 1, total),
+        )} completed`
+      : `${Math.min(current, total)} of ${total} pages`
     : "Waiting for page count";
   progressErrorActions.hidden = !FAILED_STATUSES.has(status);
+  continueJobButton.hidden = !FAILED_STATUSES.has(status);
+  cancelJobButton.hidden = status !== "failed";
+}
+
+function setStoppedJobActionsBusy(busy) {
+  continueJobButton.disabled = busy;
+  cancelJobButton.disabled = busy;
+  backToSetupButton.disabled = busy;
+}
+
+async function continueStoppedJob() {
+  if (!state.jobId) {
+    return;
+  }
+  clearGlobalError();
+  setStoppedJobActionsBusy(true);
+  const key = geminiApiKey.value.trim() || state.sessionApiKey;
+  try {
+    const job = await apiRequest(
+      `/api/jobs/${encodeURIComponent(state.jobId)}/continue`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: key || null }),
+      },
+    );
+    state.job = job;
+    renderJobProgress(job);
+    await pollJob(state.jobId);
+  } catch (error) {
+    showGlobalError(error.message);
+  } finally {
+    setStoppedJobActionsBusy(false);
+  }
+}
+
+async function cancelStoppedJob() {
+  if (!state.jobId) {
+    return;
+  }
+  clearGlobalError();
+  setStoppedJobActionsBusy(true);
+  try {
+    const job = await apiRequest(
+      `/api/jobs/${encodeURIComponent(state.jobId)}/cancel`,
+      { method: "POST" },
+    );
+    state.job = job;
+    renderJobProgress(job);
+  } catch (error) {
+    showGlobalError(error.message);
+  } finally {
+    setStoppedJobActionsBusy(false);
+  }
+}
+
+function handleProgressAction(event) {
+  const button = event.target.closest("button[data-action]");
+  if (!button || !progressErrorActions.contains(button)) {
+    return;
+  }
+  if (button.dataset.action === "continue-job") {
+    void continueStoppedJob();
+  } else if (button.dataset.action === "cancel-job") {
+    void cancelStoppedJob();
+  } else if (button.dataset.action === "new-translation") {
+    resetForNewTranslation();
+  }
 }
 
 function stopPolling() {
@@ -1045,6 +1175,48 @@ function handleReviewInput(event) {
   }
 }
 
+function handleReviewControlChange(event) {
+  const control =
+    event.target instanceof HTMLSelectElement || event.target instanceof HTMLInputElement
+      ? event.target
+      : null;
+  if (!control || !translationContent.contains(control)) {
+    return;
+  }
+  const blockElement = control.closest(".translation-block");
+  if (!blockElement) {
+    return;
+  }
+  if (control.dataset.action === "change-section-type") {
+    const ownerField = blockElement.querySelector(".footnote-owner-field");
+    const anchorField = blockElement.querySelector(".footnote-anchor-field");
+    const anchorHelp = blockElement.querySelector(".footnote-anchor-help");
+    if (ownerField) {
+      ownerField.hidden = control.value !== "footnote";
+    }
+    if (anchorField) {
+      anchorField.hidden = control.value !== "footnote";
+    }
+    if (anchorHelp) {
+      anchorHelp.hidden = control.value !== "footnote";
+    }
+  }
+  if (control.dataset.action === "change-footnote-owner") {
+    const anchorInput = blockElement.querySelector(".footnote-anchor-input");
+    const ownerEntry = state.blockIndex.get(control.value);
+    if (anchorInput instanceof HTMLInputElement) {
+      const ownerLength = asText(
+        ownerEntry?.block?.effective_text,
+        ownerEntry?.block?.machine_text,
+      ).length;
+      anchorInput.max = asText(ownerLength);
+      anchorInput.value = control.value ? asText(ownerLength) : "0";
+      anchorInput.disabled = !control.value;
+    }
+  }
+  blockElement.classList.add("is-dirty");
+}
+
 function handleReviewPaste(event) {
   const target = event.target instanceof Element ? event.target : null;
   const editor = target?.closest(".translated-editor");
@@ -1144,12 +1316,107 @@ function makeTranslationBlock(block, page, draftText) {
   if (block.classification_review_required === true) {
     meta.append(createElement("span", "classification-warning", "Check classification"));
   }
+  if (block.footnote_owner_review_required === true) {
+    meta.append(createElement("span", "classification-warning", "Choose footnote owner"));
+  }
+  const ownedFootnotes = state.reviewPages
+    .flatMap((candidatePage) => candidatePage.blocks || [])
+    .filter((candidate) => candidate.footnote_owner_block_id === block.block_id);
+  if (ownedFootnotes.length) {
+    meta.append(
+      createElement(
+        "span",
+        "footnote-owner-badge",
+        `Owns ${ownedFootnotes.length} ${ownedFootnotes.length === 1 ? "footnote" : "footnotes"}`,
+      ),
+    );
+  }
   const status = createElement(
     "span",
     `status ${reviewStatusClass(asText(block.review_status))}`.trim(),
     humanize(block.review_status || "unreviewed"),
   );
   meta.append(status);
+
+  const sectionControls = createElement("div", "section-controls");
+  const typeLabel = createElement("label", "field-label compact-field", "Section type");
+  const typeSelect = createElement("select", "section-type-select");
+  typeSelect.dataset.testid = "section-type-select";
+  typeSelect.dataset.action = "change-section-type";
+  const availableTypes = block.segment_handling === "translate"
+    ? EDITABLE_BLOCK_TYPES
+    : [asText(block.type)];
+  for (const type of availableTypes) {
+    const option = createElement("option", "", humanize(type));
+    option.value = type;
+    option.selected = type === asText(block.type);
+    typeSelect.append(option);
+  }
+  typeSelect.disabled = block.segment_handling !== "translate";
+  typeLabel.append(typeSelect);
+
+  const ownerLabel = createElement("label", "field-label compact-field footnote-owner-field", "Footnote owner");
+  const ownerSelect = createElement("select", "footnote-owner-select");
+  ownerSelect.dataset.testid = "footnote-owner-select";
+  ownerSelect.dataset.action = "change-footnote-owner";
+  const unknownOwner = createElement("option", "", "Unknown — requires review");
+  unknownOwner.value = "";
+  ownerSelect.append(unknownOwner);
+  for (const candidatePage of state.reviewPages) {
+    for (const candidate of Array.isArray(candidatePage.blocks) ? candidatePage.blocks : []) {
+      if (
+        candidate.block_id === block.block_id ||
+        candidate.type === "footnote" ||
+        candidate.segment_handling !== "translate"
+      ) {
+        continue;
+      }
+      const preview = asText(candidate.effective_text, candidate.machine_text)
+        .replace(/\s+/g, " ")
+        .slice(0, 58);
+      const option = createElement(
+        "option",
+        "",
+        `Page ${candidatePage.original_page_number} · ${humanize(candidate.type)} · ${preview}`,
+      );
+      option.value = asText(candidate.block_id);
+      option.selected = option.value === asText(block.footnote_owner_block_id);
+      ownerSelect.append(option);
+    }
+  }
+  ownerLabel.append(ownerSelect);
+  ownerLabel.hidden = asText(block.type) !== "footnote";
+  const selectedOwnerEntry = state.blockIndex.get(asText(block.footnote_owner_block_id));
+  const selectedOwnerLength = asText(
+    selectedOwnerEntry?.block?.effective_text,
+    selectedOwnerEntry?.block?.machine_text,
+  ).length;
+  const anchorLabel = createElement(
+    "label",
+    "field-label compact-field footnote-anchor-field",
+    "Marker after character",
+  );
+  const anchorInput = createElement("input", "footnote-anchor-input");
+  anchorInput.type = "number";
+  anchorInput.min = "0";
+  anchorInput.max = asText(selectedOwnerLength);
+  anchorInput.step = "1";
+  anchorInput.value = asText(block.footnote_anchor_offset, selectedOwnerLength);
+  anchorInput.disabled = !block.footnote_owner_block_id;
+  anchorInput.dataset.testid = "footnote-anchor-input";
+  anchorInput.dataset.action = "change-footnote-anchor";
+  anchorLabel.append(anchorInput);
+  anchorLabel.hidden = asText(block.type) !== "footnote";
+  sectionControls.append(typeLabel, ownerLabel, anchorLabel);
+  sectionControls.append(
+    createElement(
+      "p",
+      "footnote-anchor-help",
+      "Use 0 for a marker before the first character; the text length places it at the end.",
+    ),
+  );
+  sectionControls.querySelector(".footnote-anchor-help").hidden =
+    asText(block.type) !== "footnote";
 
   const editor = createElement("div", "translated-editor");
   editor.dataset.testid = "translated-block";
@@ -1215,7 +1482,7 @@ function makeTranslationBlock(block, page, draftText) {
   message.setAttribute("aria-live", "polite");
   actions.append(save, validate, message);
 
-  article.append(meta, editor);
+  article.append(meta, sectionControls, editor);
   if (
     Number(block.base_revision) > 0 &&
     asText(block.machine_text) &&
@@ -1496,6 +1763,7 @@ function renderReview(drafts = new Map(), options = {}) {
   document.title = `${filename} · ArticleTranslator`;
   configureExportLinks(state.jobId, {
     pdf: exportPdfLink,
+    tex: exportLatexLink,
     md: exportMarkdownLink,
     txt: exportTextLink,
   });
@@ -1554,6 +1822,15 @@ async function saveBlock(block, blockElement, editor, status, buttons, message) 
       translationScroll.getBoundingClientRect().top
     : null;
   try {
+    const selectedType = asText(
+      blockElement.querySelector(".section-type-select")?.value,
+      block.type,
+    );
+    const selectedOwner = blockElement.querySelector(".footnote-owner-select")?.value || null;
+    const anchorControl = blockElement.querySelector(".footnote-anchor-input");
+    const selectedAnchor = anchorControl instanceof HTMLInputElement
+      ? Number(anchorControl.value)
+      : null;
     const response = await apiRequest(
       `/api/jobs/${encodeURIComponent(state.jobId)}/revisions`,
       {
@@ -1562,6 +1839,12 @@ async function saveBlock(block, blockElement, editor, status, buttons, message) 
         body: JSON.stringify({
           block_id: block.block_id,
           editorial_text: editorialText,
+          type: selectedType,
+          footnote_owner_block_id: selectedType === "footnote" ? selectedOwner : null,
+          footnote_anchor_offset:
+            selectedType === "footnote" && selectedOwner && Number.isInteger(selectedAnchor)
+              ? selectedAnchor
+              : null,
           expected_base_revision: oldVersion,
           status,
         }),
@@ -1817,6 +2100,7 @@ function makeExportMenu(jobId) {
   options.setAttribute("aria-label", "Export article");
   const formats = [
     ["pdf", "LaTeX PDF (.pdf)"],
+    ["tex", "LaTeX source (.tex)"],
     ["md", "Markdown (.md)"],
     ["txt", "Plain text (.txt)"],
   ];
@@ -1877,7 +2161,12 @@ function renderTranslationLibrary(payload) {
     open.dataset.action = "open-review";
     open.dataset.jobId = jobId;
     const actions = createElement("div", "review-list-actions");
-    actions.append(open, makeExportMenu(jobId));
+    const remove = createElement("button", "text-button danger-button", "Delete");
+    remove.type = "button";
+    remove.dataset.action = "delete-review";
+    remove.dataset.jobId = jobId;
+    remove.dataset.filename = asText(review.filename, "this article");
+    actions.append(open, makeExportMenu(jobId), remove);
     card.append(summary, actions);
     reviewList.append(card);
   }
@@ -1920,11 +2209,34 @@ async function openLibraryReview(jobId, button) {
 
 function handleReviewListClick(event) {
   const target = event.target instanceof Element ? event.target : null;
-  const button = target?.closest("[data-action='open-review']");
+  const button = target?.closest("[data-action]");
   if (!button || !reviewList.contains(button)) {
     return;
   }
-  void openLibraryReview(asText(button.dataset.jobId), button);
+  if (button.dataset.action === "open-review") {
+    void openLibraryReview(asText(button.dataset.jobId), button);
+    return;
+  }
+  if (button.dataset.action === "delete-review") {
+    void deleteLibraryReview(button);
+  }
+}
+
+async function deleteLibraryReview(button) {
+  const jobId = asText(button.dataset.jobId);
+  const filename = asText(button.dataset.filename, "this article");
+  if (!jobId || !window.confirm(`Delete ${filename} and all of its review edits?`)) {
+    return;
+  }
+  clearGlobalError();
+  button.disabled = true;
+  try {
+    await apiRequest(`/api/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+    await loadTranslationLibrary();
+  } catch (error) {
+    button.disabled = false;
+    showGlobalError(error.message);
+  }
 }
 
 function elementPositionInScroller(element, scroller) {
@@ -2017,6 +2329,20 @@ async function restoreJobFromUrl() {
       await pollJob(jobId);
     }
   } catch (error) {
+    try {
+      const payload = await apiRequest("/api/jobs/recoverable");
+      const recoverable = Array.isArray(payload?.jobs) ? payload.jobs : [];
+      if (recoverable.length === 1) {
+        const job = recoverable[0];
+        state.jobId = asText(job.job_id);
+        state.job = job;
+        window.history.replaceState({}, "", `/?job=${encodeURIComponent(state.jobId)}`);
+        renderJobProgress(job);
+        return;
+      }
+    } catch {
+      // The original status error below is more useful than a recovery-list failure.
+    }
     translationSetup.hidden = false;
     jobProgress.hidden = true;
     activateTab("translate");
@@ -2043,10 +2369,23 @@ addMappingButton.addEventListener("click", () => addMapping());
 mappingBody.addEventListener("click", handleMappingClick);
 mappingBody.addEventListener("input", handleMappingInput);
 form.addEventListener("submit", startTranslation);
+modelSelect.addEventListener("change", () => {
+  jobModelSelect.value = modelSelect.value;
+});
+translationStyle.addEventListener("change", () => {
+  jobTranslationStyle.value = translationStyle.value;
+});
+jobModelSelect.addEventListener("change", () => {
+  modelSelect.value = jobModelSelect.value;
+});
+jobTranslationStyle.addEventListener("change", () => {
+  translationStyle.value = jobTranslationStyle.value;
+});
 dismissAlert.addEventListener("click", clearGlobalError);
 translationContent.addEventListener("click", handleReviewClick);
 translationContent.addEventListener("keydown", handleReviewKeydown);
 translationContent.addEventListener("input", handleReviewInput);
+translationContent.addEventListener("change", handleReviewControlChange);
 translationContent.addEventListener("paste", handleReviewPaste);
 translationScroll.addEventListener("scroll", requestScrollSync, { passive: true });
 window.addEventListener("resize", requestScrollSync);
@@ -2090,6 +2429,7 @@ function resetForNewTranslation() {
   fullSizePageLink.href = "#";
   configureExportLinks(null, {
     pdf: exportPdfLink,
+    tex: exportLatexLink,
     md: exportMarkdownLink,
     txt: exportTextLink,
   });
@@ -2118,7 +2458,7 @@ function resetForNewTranslation() {
   document.title = "ArticleTranslator";
 }
 
-backToSetupButton.addEventListener("click", resetForNewTranslation);
+progressErrorActions.addEventListener("click", handleProgressAction);
 newTranslationButton.addEventListener("click", () => {
   if (state.reviewDrafts.size && !window.confirm("Discard unsaved block edits?")) {
     return;

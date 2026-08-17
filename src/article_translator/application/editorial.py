@@ -20,7 +20,7 @@ from article_translator.domain.editorial import (
     UncertaintyFallback,
     UncertaintyHighlight,
 )
-from article_translator.domain.enums import ReviewStatus
+from article_translator.domain.enums import BlockType, ReviewStatus, SegmentHandling
 from article_translator.domain.errors import (
     EditorialError,
     EditorialTargetError,
@@ -117,6 +117,9 @@ class EditorialService:
         editorial_text: str,
         *,
         expected_base_revision: int,
+        block_type: BlockType | None = None,
+        footnote_owner_block_id: str | None = None,
+        footnote_anchor_offset: int | None = None,
         status: ReviewStatus = ReviewStatus.IN_REVIEW,
         editor: str | None = None,
         note: str | None = None,
@@ -125,6 +128,55 @@ class EditorialService:
             review = self._review_document_unlocked(document, translation_run_id)
             block = _find_review_block(review, block_id)
             self._assert_base_revision(block, expected_base_revision)
+            preserve_metadata = block_type is None
+            block_type = block_type or block.type
+            if preserve_metadata:
+                footnote_owner_block_id = block.footnote_owner_block_id
+            if block.segment_handling is not SegmentHandling.TRANSLATE and block_type != block.type:
+                raise EditorialTargetError(
+                    "Table and manual-insertion block types cannot be changed in this editor"
+                )
+            if block_type in {BlockType.TABLE, BlockType.FIGURE} and block_type != block.type:
+                raise EditorialTargetError(
+                    "Use the dedicated table or figure workflow for that section type"
+                )
+            if block_type is BlockType.FOOTNOTE and any(
+                candidate.block_id != block.block_id
+                and candidate.footnote_owner_block_id == block.block_id
+                for page in review.pages
+                for candidate in page.blocks
+            ):
+                raise EditorialTargetError(
+                    "Reassign this section's owned footnotes before changing it to a footnote"
+                )
+            owner_offset = None
+            owner_review_required = False
+            if block_type is BlockType.FOOTNOTE:
+                if footnote_owner_block_id is None:
+                    owner_review_required = True
+                else:
+                    owner = _find_review_block(review, footnote_owner_block_id)
+                    if owner.block_id == block.block_id or owner.type is BlockType.FOOTNOTE:
+                        raise EditorialTargetError(
+                            "A footnote owner must be a different, non-footnote text section"
+                        )
+                    if owner.segment_handling is not SegmentHandling.TRANSLATE:
+                        raise EditorialTargetError(
+                            "A footnote owner must be an ordinary translated text section"
+                        )
+                    if footnote_anchor_offset is not None:
+                        if footnote_anchor_offset > len(owner.effective_translated_text):
+                            raise EditorialTargetError(
+                                "The footnote marker position is outside the owner text"
+                            )
+                        owner_offset = footnote_anchor_offset
+                    else:
+                        owner_offset = (
+                            block.footnote_anchor_offset
+                            if footnote_owner_block_id == block.footnote_owner_block_id
+                            and block.footnote_anchor_offset is not None
+                            else len(owner.effective_translated_text)
+                        )
             resolved_ids = _resolved_ids_for_block(
                 self._repository,
                 document.document_id,
@@ -136,6 +188,10 @@ class EditorialService:
                 translation_run_id=translation_run_id,
                 block=block,
                 editorial_text=editorial_text,
+                effective_type=block_type,
+                footnote_owner_block_id=footnote_owner_block_id,
+                footnote_anchor_offset=owner_offset,
+                footnote_owner_review_required=owner_review_required,
                 status=status,
                 editor=editor,
                 note=note,
@@ -248,6 +304,18 @@ class EditorialService:
                 document,
                 settings,
                 editorial_overrides=effective_text,
+                type_overrides={
+                    block.block_id: block.type for block in _iter_review_blocks(review)
+                },
+                footnote_owner_overrides={
+                    block.block_id: (
+                        block.footnote_owner_block_id,
+                        block.footnote_anchor_offset,
+                        block.footnote_owner_review_required,
+                    )
+                    for block in _iter_review_blocks(review)
+                    if block.type is BlockType.FOOTNOTE
+                },
             )
 
     def compile_reviewed_text(
@@ -264,6 +332,9 @@ class EditorialService:
                 document,
                 settings,
                 editorial_overrides=_effective_text_by_block(review),
+                type_overrides={
+                    block.block_id: block.type for block in _iter_review_blocks(review)
+                },
             )
 
     def compile_reviewed_latex(
@@ -280,6 +351,18 @@ class EditorialService:
                 document,
                 settings,
                 editorial_overrides=_effective_text_by_block(review),
+                type_overrides={
+                    block.block_id: block.type for block in _iter_review_blocks(review)
+                },
+                footnote_owner_overrides={
+                    block.block_id: (
+                        block.footnote_owner_block_id,
+                        block.footnote_anchor_offset,
+                        block.footnote_owner_review_required,
+                    )
+                    for block in _iter_review_blocks(review)
+                    if block.type is BlockType.FOOTNOTE
+                },
             )
 
     def _review_document_unlocked(
@@ -288,7 +371,19 @@ class EditorialService:
         translation_run_id: str,
     ) -> ReviewDocument:
         _assert_document_run(document, translation_run_id)
-        block_states: dict[str, tuple[str, int, ReviewStatus, set[str]]] = {}
+        block_states: dict[
+            str,
+            tuple[
+                str,
+                int,
+                ReviewStatus,
+                set[str],
+                BlockType,
+                str | None,
+                int | None,
+                bool,
+            ],
+        ] = {}
         specs_by_block: dict[str, list[_UncertaintySpec]] = {}
         fallbacks_by_block: dict[str, list[UncertaintyFallback]] = {}
 
@@ -309,16 +404,33 @@ class EditorialService:
                 latest_number = latest.revision_number
                 status = latest.status
                 resolved_ids = set(latest.resolved_uncertainty_ids)
+                effective_type = latest.effective_type or block.type
+                if latest.effective_type is None:
+                    owner_block_id = block.footnote_owner_block_id
+                    owner_offset = block.footnote_anchor_offset
+                    owner_review_required = block.footnote_owner_review_required
+                else:
+                    owner_block_id = latest.footnote_owner_block_id
+                    owner_offset = latest.footnote_anchor_offset
+                    owner_review_required = bool(latest.footnote_owner_review_required)
             else:
                 effective_text = block.translated_text or ""
                 latest_number = 0
                 status = ReviewStatus.UNREVIEWED
                 resolved_ids = set()
+                effective_type = block.type
+                owner_block_id = block.footnote_owner_block_id
+                owner_offset = block.footnote_anchor_offset
+                owner_review_required = block.footnote_owner_review_required
             block_states[block.block_id] = (
                 effective_text,
                 latest_number,
                 status,
                 resolved_ids,
+                effective_type,
+                owner_block_id,
+                owner_offset,
+                owner_review_required,
             )
             specs, fallbacks = _machine_uncertainty_specs(block)
             specs_by_block[block.block_id] = specs
@@ -331,7 +443,7 @@ class EditorialService:
         highlights_by_block: dict[str, list[UncertaintyHighlight]] = {}
         all_highlights: list[UncertaintyHighlight] = []
         for block in _iter_machine_blocks(document):
-            effective_text, _, _, resolved_ids = block_states[block.block_id]
+            effective_text, _, _, resolved_ids, _, _, _, _ = block_states[block.block_id]
             highlights, newly_unlocated = _locate_unresolved_specs(
                 block.translated_text or "",
                 effective_text,
@@ -362,7 +474,17 @@ class EditorialService:
         for page in document.pages:
             review_blocks: list[ReviewBlock] = []
             for block in page.blocks:
-                effective_text, revision_number, status, _ = block_states[block.block_id]
+                (
+                    effective_text,
+                    revision_number,
+                    status,
+                    _,
+                    effective_type,
+                    owner_block_id,
+                    owner_offset,
+                    owner_review_required,
+                ) = block_states[block.block_id]
+                effective_is_footnote = effective_type is BlockType.FOOTNOTE
                 review_blocks.append(
                     ReviewBlock(
                         document_id=document.document_id,
@@ -370,16 +492,33 @@ class EditorialService:
                         block_id=block.block_id,
                         original_page_number=block.original_page_number,
                         order=block.order,
-                        type=block.type,
+                        machine_type=block.type,
+                        type=effective_type,
                         segment_handling=block.segment_handling,
                         source_text=block.source_text,
                         machine_translated_text=block.translated_text,
                         effective_translated_text=effective_text,
                         manual_insertion_reason=block.manual_insertion_reason,
-                        footnote_marker=block.footnote_marker,
-                        continuation=block.continuation,
-                        paragraph_continuation=block.paragraph_continuation,
-                        continues_from_block_id=block.continues_from_block_id,
+                        footnote_marker=(block.footnote_marker if effective_is_footnote else None),
+                        footnote_owner_block_id=owner_block_id,
+                        footnote_anchor_offset=owner_offset,
+                        footnote_owner_review_required=owner_review_required,
+                        continuation=(
+                            block.continuation
+                            if effective_is_footnote
+                            or block.segment_handling is not SegmentHandling.TRANSLATE
+                            else None
+                        ),
+                        paragraph_continuation=(
+                            block.paragraph_continuation
+                            if effective_type is BlockType.BODY
+                            else None
+                        ),
+                        continues_from_block_id=(
+                            block.continues_from_block_id
+                            if effective_type is BlockType.BODY
+                            else None
+                        ),
                         classification_review_required=block.classification_review_required,
                         latest_revision_number=revision_number,
                         review_status=status,
@@ -720,12 +859,17 @@ def _make_revision(
     translation_run_id: str,
     block: ReviewBlock,
     editorial_text: str,
+    effective_type: BlockType | None = None,
+    footnote_owner_block_id: str | None = None,
+    footnote_anchor_offset: int | None = None,
+    footnote_owner_review_required: bool | None = None,
     status: ReviewStatus,
     editor: str | None,
     note: str | None,
     resolved_uncertainty_ids: set[str],
 ) -> BlockRevision:
     return BlockRevision(
+        schema_version="2.0",
         revision_id=f"revision-{uuid4()}",
         document_id=document.document_id,
         translation_run_id=translation_run_id,
@@ -733,6 +877,18 @@ def _make_revision(
         revision_number=block.latest_revision_number + 1,
         base_revision=block.latest_revision_number,
         editorial_text=editorial_text,
+        effective_type=effective_type or block.type,
+        footnote_owner_block_id=(
+            footnote_owner_block_id if effective_type is not None else block.footnote_owner_block_id
+        ),
+        footnote_anchor_offset=(
+            footnote_anchor_offset if effective_type is not None else block.footnote_anchor_offset
+        ),
+        footnote_owner_review_required=(
+            footnote_owner_review_required
+            if effective_type is not None
+            else block.footnote_owner_review_required
+        ),
         status=status,
         editor=editor,
         note=note,

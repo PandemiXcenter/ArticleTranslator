@@ -63,6 +63,10 @@ class ArtifactRepository(Protocol):
 
     def write_markdown(self, translation_run_id: str, markdown: str) -> Path: ...
 
+    def write_latex(self, translation_run_id: str, latex: str) -> Path: ...
+
+    def delete_translation_run(self, translation_run_id: str) -> None: ...
+
     def list_block_revisions(
         self,
         document_id: str,

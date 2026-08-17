@@ -55,27 +55,43 @@ The server boundary is intentionally small:
    and boolean API-key status.
 2. `POST /api/jobs` streams a multipart PDF into an opaque staging directory,
    checks configured size limits, a safe `.pdf` display name, and the PDF header,
-   then resolves strict per-job settings and term mappings.
+   then resolves strict per-job languages, model, style, previous-page context,
+   image DPI, Auto continue policy, and term mappings from displayed TOML-backed
+   defaults.
 3. `WebJobManager` records an opaque browser job ID and runs prepare, translate,
    and compile in a bounded `ThreadPoolExecutor`.
-4. The browser polls process-local progress. A ready job can be projected through
-   `EditorialService` for review, revisions, uncertainty replacement, and
-   reviewed Markdown, plain-text, and locally typeset PDF downloads.
+4. The browser polls process-local progress. On failure it can continue the same
+   active run or dismiss it without deleting checkpoints. When Auto continue is
+   selected, the manager retries inline up to `web.auto_continue_attempts`; this
+   avoids queuing behind itself when the configured executor has one worker.
+   A ready job can be projected through `EditorialService` for review, revisions,
+   uncertainty replacement, and reviewed Markdown, plain-text, and locally
+   typeset PDF downloads.
 5. `GET /api/jobs` lists every validated completed translation run discovered
    under the configured artifact root. Completed-run routes accept the stable
    translation-run ID rather than requiring the browser alias created at upload.
 6. The staged upload and any ephemeral backend key are discarded after the
    background run. Durable artifacts remain under the configured artifact root.
+7. `DELETE /api/jobs/{translation-run-id}` removes one selected completed run and
+   its editorial history after CSRF validation. The manifest run index is updated;
+   prepared pages and sibling immutable runs remain available.
+8. `GET /api/jobs/recoverable` discovers stopped failed manifests by stable run
+   ID. CSRF-protected `POST .../continue` validates saved semantics and resumes
+   the same run; `POST .../cancel` dismisses the stopped attempt but retains its
+   page artifacts.
 
-The manager scans canonical manifests and completed `document.json` artifacts at
-startup and rebuilds the Articles catalog. A completed run can therefore be opened
-by its stable translation-run ID after either the browser or server restarts. The
-submission-time browser alias, executor queue, in-progress state, and progress
-record still exist only in one server process and are lost on restart. Completed
-run discovery does not make that executor a durable queue and does not introduce
-a database. The server has no authentication, cancellation, multi-process
-coordination, or remote deployment contract. `WebConfig.host` accepts loopback
-addresses only.
+The manager scans canonical manifests at startup. It rebuilds the Articles
+catalog from completed `document.json` artifacts and rebuilds stopped-job records
+from failed active manifests. Both use stable translation-run IDs. Successful
+page checkpoints are fingerprint-validated again during continuation, and the
+first missing/failed page is the next provider call. The resolved Auto continue
+selection and retry bound are operational provenance in the active manifest;
+they do not participate in page fingerprints. The submission-time browser
+alias, executor queue, and live running progress still exist only in one server
+process and are lost on restart. Discovery does not restart work automatically,
+make the executor a durable queue, or introduce a database. The server has no
+authentication, active-request interruption, multi-process coordination, or
+remote deployment contract. `WebConfig.host` accepts loopback addresses only.
 
 Mutating routes require a same-site CSRF cookie/header pair. Responses use
 no-store and basic browser hardening headers. These controls reduce accidental
@@ -156,7 +172,7 @@ Never overload the phrase “page number”:
 
 Every request contains exactly one current-page PNG, that page's complete
 Markdown, and the fully resolved translation settings. The primary pass uses
-`translate-page-v5`. When that pass tags at least one table or table-like region,
+`translate-page-v6`. When that pass tags at least one table or table-like region,
 the pipeline immediately makes one additional batched request for that page using
 `reconstruct-tables-v1`; it sends the same PNG and complete page MarkItDown/OCR,
 plus the first-pass segmentation and exact table targets. Multiple table regions
@@ -286,8 +302,11 @@ contract. `ProviderMetadata` on the page records primary prompt/response/token
 provenance; `TableReconstructionMetadata` records the second prompt version,
 response/tokens, target block IDs, timestamp, and table fingerprint.
 
-Any change invalidates reuse. Without `--force`, stale data stops visibly. The
-first translation appends a UUID run ID to the manifest and makes it active. A
+Any change invalidates reuse. Without `--force`, stale translation data stops
+visibly. Image DPI is handled earlier at the preparation boundary: changing it
+automatically publishes a newly rendered preparation, preserves prior immutable
+run IDs, and clears the active run so the next translation cannot reuse the old
+image fingerprints. The first translation appends a UUID run ID to the manifest and makes it active. A
 validated primary result is written atomically to the page's `translation.json`
 before a required table call. While it contains current-schema table tags it is
 an intermediate stage checkpoint and cannot enter the completed document. The
@@ -306,6 +325,14 @@ and keys never enter that artifact or the web job status. Successful retry
 removes the page failure artifact. Forced translation appends and activates a new
 run, leaving older successful run bytes untouched.
 
+The Gemini JSON schema cannot express page-edge position rules such as “only the
+first body block may continue from the previous page.” The adapter leaves valid
+responses untouched. If Gemini returns a contradictory edge claim, the adapter
+removes only the impossible direction, marks the block's classification for
+review, and uses `unknown` when no safe direction remains. This prevents the same
+semantic validation edge case from repeatedly stopping a run while keeping the
+ambiguity visible to editors.
+
 Operational provider settings such as timeouts, retries, and the inline-size
 guard are retained as page/manifest provenance but do not invalidate already
 successful content. This allows an operator to raise a transport limit and resume
@@ -315,7 +342,7 @@ page inputs do invalidate content.
 Compilation requires the canonical document containing every physical page.
 There is intentionally no silent partial-success mode.
 
-## Canonical dataset and Markdown projection
+## Canonical dataset and compiled projections
 
 `runs/<run-id>/output/document.json` contains ordered `PageTranslation` records,
 including the shared translation-run ID, page source Markdown, and immutable
@@ -326,7 +353,11 @@ machine target-language GFM Markdown, and distinct table-pass provenance. Their
 cell transcription. Figure regions retain ordered, text-free manual-insertion
 placeholders.
 
-`runs/<run-id>/output/document.md`:
+`runs/<run-id>/output/document.tex` is the primary compiled projection. It emits
+safe XeLaTeX source directly from canonical blocks, inserts owned notes as real
+`\footnote{...}` commands at their trusted owner offsets, and leaves unowned notes
+as visibly review-required standalone material. `runs/<run-id>/output/document.md`
+is an additional projection that:
 
 - emits invisible physical-page comments when configured;
 - renders titles/headings/lists/quotes/captions/footnotes logically;
@@ -386,7 +417,8 @@ Markdown and other exporters
 ```
 
 A revision has a stable revision ID, document ID, translation-run ID, target block
-ID, expected base revision, edited text, review status, editor/note, and
+ID, expected base revision, edited text, effective section type, optional
+footnote-owner block ID and marker offset, review status, editor/note, and
 timestamp. Block IDs are unique only within a run, so the composite
 `(document_id, translation_run_id, block_id)` is the revision target. Revisions
 never carry automatically to a regenerated run. Optimistic base versions prevent
@@ -401,7 +433,9 @@ runs/<translation-run-id>/revisions/<block-id>/<revision-number>.json
 Creation is atomic and refuses to replace an existing revision. Reading validates
 scope, filenames, and contiguous base/revision numbers. `EditorialService`
 projects a strict `ReviewDocument` by combining immutable machine text with the
-latest valid revision for each block.
+latest valid revision for each block. Revision schema 2.0 adds effective section
+type and footnote placement metadata; legacy schema 1.0 text-only revisions remain
+readable and inherit their machine block metadata.
 
 Review navigation is stored independently at:
 
@@ -414,11 +448,12 @@ This small mutable sidecar contains the document/run scope, the latest
 X** but is not canonical translation data and is not revision history.
 
 Reviewed Markdown, plain text, and LaTeX are projected directly from canonical
-blocks plus this effective view; exporters never parse `document.md` to recover
-structure. PDF download passes the generated LaTeX through a configured local
+blocks plus this effective view; exporters never parse a compiled projection to
+recover structure. PDF download passes the generated LaTeX through a configured local
 XeLaTeX adapter with a timeout and shell escape disabled. Temporary compilation
 files are removed after the response bytes are produced. These formats do not
-change `runs/<run-id>/output/document.json` or its machine `document.md`. The
+change `runs/<run-id>/output/document.json` or its machine `document.tex` and
+`document.md` projections. The
 current policy uses the latest effective revision whether its status is
 `in_review`, `accepted`, or `needs_work`; an accepted-only export policy is not
 implemented.
@@ -434,7 +469,7 @@ The browser interface is intentionally operational rather than promotional:
 - **Settings** selects an allowlisted Gemini model, translation style, and key
   persistence behavior.
 - **Articles** first presents the filesystem-backed catalog of completed runs,
-  editorial progress, a conditional Review/Read action, and the three-format
+  editorial progress, a conditional Review/Read action, and the four-format
   export menu. Selecting one uses its stable translation-run ID, loads the complete strict
   review projection, and mounts the full translated document. Only the translated
   pane is user-scrollable. Its current `original_page_number` fetches and displays
@@ -448,9 +483,11 @@ The browser interface is intentionally operational rather than promotional:
   merging their editors or revision histories. Structured uncertainties are
   highlighted and expose one/all replacement according to the service contract.
   The **Uncertain terms** control opens all unresolved groups in descending
-  occurrence order and jumps to the first marked instance. Reviewed Markdown,
-  plain text, and locally typeset PDF are downloaded from the effective document
-  view.
+  occurrence order and jumps to the first marked instance. Reviewers can change a
+  translated section's effective type. A footnote additionally exposes its owner
+  section and Unicode character offset for the inline marker; an unknown owner is
+  an explicit review state. Reviewed XeLaTeX source, Markdown, plain text, and
+  locally typeset PDF are downloaded from the effective document view.
 
 The interface does not expose artifact paths, raw provider objects, or raw
 responses. It does not parse `document.md` to rebuild pages or blocks.
@@ -467,9 +504,9 @@ responses. It does not parse `document.md` to rebuild pages or blocks.
 - New export format: project `DocumentTranslation`; do not parse Markdown or
   another derivative format.
 - Durable/multi-process execution: replace the process-local submission manager
-  behind an application port, then add in-progress recovery, cancellation,
-  locking, and queue semantics. The existing completed-run catalog is filesystem
-  discovery and does not provide those guarantees.
+  behind an application port, then add automatic running-job recovery, active
+  cancellation, locking, and queue semantics. Existing completed/failed-run
+  discovery does not provide those guarantees.
 - Remote use: design authentication, authorization, CSRF/origin policy, encrypted
   secret storage, retention, and deployment explicitly before allowing a
   non-loopback host.
@@ -481,12 +518,14 @@ responses. It does not parse `document.md` to rebuild pages or blocks.
 - Prompt evolution: update the applicable resource, bump `PROMPT_VERSION` and/or
   `TABLE_PROMPT_VERSION`, and add checkpoint-invalidation tests.
 
-New core persisted artifacts use schema version 4.0 because reconstructed-table
-handling and per-pass provenance are canonical. Filesystem reads apply explicit
-in-memory schema 2.0 and 3.0 compatibility migrations without rewriting immutable
-artifacts. Schema 2.0 translated tables remain marked as legacy translated
-tables; schema 3.0 manual table placeholders remain marked as legacy manual
-tables. Neither is presented as a schema 4.0 reconstruction or automatically
+New core persisted artifacts use schema version 5.0 because footnote ownership,
+reconstructed-table handling, and per-pass provenance are canonical. Filesystem
+reads apply explicit in-memory schema 2.0, 3.0, and 4.0 compatibility migrations
+without rewriting immutable artifacts. Migrated footnotes retain their text but
+receive unknown ownership that must be reviewed. Schema 2.0 translated tables
+remain marked as legacy translated tables; schema 3.0 manual table placeholders
+remain marked as legacy manual
+tables. Neither is presented as a schema 5.0 reconstruction or automatically
 sent through the new follow-up. Translated figures are rejected because they were
 never valid schema 2.0 blocks. Version 1.0 manifests and translations remain
 rejected; no run identity is inferred for them.
