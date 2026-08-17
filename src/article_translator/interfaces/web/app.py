@@ -158,6 +158,7 @@ def create_app(
                 "max_pdf_pages": config.web.max_pdf_pages,
                 "max_glossary_entries": config.web.max_glossary_entries,
                 "max_term_characters": config.web.max_term_characters,
+                "max_instruction_characters": config.web.max_instruction_characters,
                 "status_poll_interval_ms": config.web.status_poll_interval_ms,
             },
         }
@@ -512,6 +513,7 @@ def _parse_job_settings(
             source_language=config.translation.source_language,
             target_language=config.translation.target_language,
             style=config.translation.style,
+            footnote_appearance_instructions=(config.translation.footnote_appearance_instructions),
             previous_page_context_count=config.translation.previous_page_context_count,
             image_dpi=config.extraction.image_dpi,
             auto_continue=config.web.auto_continue_default,
@@ -530,6 +532,13 @@ def _parse_job_settings(
             status_code=422,
             detail="Select a model allowed by the project configuration",
         )
+    if len(requested.footnote_appearance_instructions or "") > (
+        config.web.max_instruction_characters
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Footnote appearance guidance exceeds the configured character limit",
+        )
 
     provider = config.provider.model_copy(
         update={"gemini": config.provider.gemini.model_copy(update={"model": requested.model})}
@@ -539,6 +548,11 @@ def _parse_job_settings(
             "source_language": requested.source_language,
             "target_language": requested.target_language,
             "style": requested.style,
+            "footnote_appearance_instructions": (
+                requested.footnote_appearance_instructions
+                if "footnote_appearance_instructions" in requested.model_fields_set
+                else config.translation.footnote_appearance_instructions
+            ),
             "previous_page_context_count": requested.previous_page_context_count,
         }
     )

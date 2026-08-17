@@ -20,6 +20,7 @@ class JobTranslationSettings(ApiModel):
     source_language: NonEmptyText = Field(max_length=100)
     target_language: NonEmptyText = Field(max_length=100)
     style: TranslationStyle
+    footnote_appearance_instructions: str | None = Field(default=None, max_length=4_000)
     previous_page_context_count: int = Field(ge=0, le=10)
     image_dpi: int = Field(ge=72, le=600)
     auto_continue: bool

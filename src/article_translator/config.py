@@ -73,6 +73,7 @@ class WebConfig(ConfigModel):
     max_pdf_pages: int = Field(ge=1, le=10_000)
     max_glossary_entries: int = Field(ge=0, le=10_000)
     max_term_characters: int = Field(ge=1, le=4_000)
+    max_instruction_characters: int = Field(ge=1, le=4_000)
     status_poll_interval_ms: int = Field(ge=250, le=30_000)
     auto_continue_default: bool
     auto_continue_attempts: int = Field(ge=1, le=10)
@@ -85,6 +86,7 @@ class ConfiguredTranslationSettings(TranslationSettings):
     target_language: NonEmptyText
     style: TranslationStyle
     custom_instructions: str | None
+    footnote_appearance_instructions: str | None
     glossary: dict[str, str]
     preserve_names: bool
     preserve_citations: bool

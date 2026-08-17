@@ -97,7 +97,7 @@ inline at the join. This cannot retroactively rewrite the preceding fragment.
 
 The same context can resolve a word, sentence, heading, footnote, or table
 continuation that enters the current page. The main contract is versioned as
-`translate-page-v7`; the table contract is `reconstruct-tables-v1`.
+`translate-page-v8`; the table contract is `reconstruct-tables-v1`.
 
 ## Quick start: local interface
 
@@ -121,7 +121,8 @@ loopback host or port. The interface is organized as an internal workbench:
 
 - **Translate** selects a laptop PDF and shows the complete per-job choices before
   submission: input/output languages, Gemini model, translation style, finalized
-  previous-page text context, and current-page image DPI. The fields start from
+  previous-page text context, current-page image DPI, and optional simple guidance
+  describing how footnotes look in the selected PDF. The fields start from
   TOML defaults; the checked-in language direction is Danish to English.
   **Auto continue** can be switched on or off before submission. When enabled,
   it retries a failed page within the same run up to the TOML-configured limit.

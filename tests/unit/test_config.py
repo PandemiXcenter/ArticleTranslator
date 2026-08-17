@@ -23,6 +23,7 @@ def test_default_toml_is_the_complete_non_secret_configuration() -> None:
     assert config.translation.source_language == "Danish"
     assert config.translation.target_language == "English"
     assert config.translation.previous_page_context_count == 2
+    assert config.translation.footnote_appearance_instructions is None
     assert config.extraction.image_dpi == 150
     assert config.export.include_page_comments is True
     assert config.pdf_export.latex_engine == "xelatex"
@@ -33,6 +34,26 @@ def test_default_toml_is_the_complete_non_secret_configuration() -> None:
     assert config.web.max_pdf_pages == 500
     assert config.web.auto_continue_default is False
     assert config.web.auto_continue_attempts == 1
+    assert config.web.max_instruction_characters == 4_000
+
+
+def test_footnote_appearance_config_is_required_and_bounded(tmp_path: Path) -> None:
+    source = Path("config/default.toml").read_text(encoding="utf-8")
+    missing = tmp_path / "missing-footnote-guidance.toml"
+    missing.write_text(
+        source.replace('footnote_appearance_instructions = ""\n', ""),
+        encoding="utf-8",
+    )
+    invalid_limit = tmp_path / "invalid-instruction-limit.toml"
+    invalid_limit.write_text(
+        source.replace("max_instruction_characters = 4000", "max_instruction_characters = 4001"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="footnote_appearance_instructions"):
+        load_project_config(missing)
+    with pytest.raises(ConfigurationError, match="less than or equal to 4000"):
+        load_project_config(invalid_limit)
 
 
 def test_unknown_config_keys_fail_fast(tmp_path: Path) -> None:

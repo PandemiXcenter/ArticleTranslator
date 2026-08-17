@@ -85,15 +85,16 @@ class TranslationSettings(ContractModel):
     target_language: NonEmptyText = "English"
     style: TranslationStyle = TranslationStyle.BALANCED
     custom_instructions: str | None = Field(default=None, max_length=4_000)
+    footnote_appearance_instructions: str | None = Field(default=None, max_length=4_000)
     glossary: dict[str, str] = Field(default_factory=dict)
     preserve_names: bool = True
     preserve_citations: bool = True
     mark_uncertain_terms: bool = True
     previous_page_context_count: int = Field(default=0, ge=0, le=10)
 
-    @field_validator("custom_instructions")
+    @field_validator("custom_instructions", "footnote_appearance_instructions")
     @classmethod
-    def normalize_custom_instructions(cls, value: str | None) -> str | None:
+    def normalize_optional_instructions(cls, value: str | None) -> str | None:
         if value is None:
             return None
         stripped = value.strip()

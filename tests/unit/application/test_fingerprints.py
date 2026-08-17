@@ -75,6 +75,27 @@ def test_page_fingerprint_includes_table_prompt_contract_even_without_a_table(
     assert changed != original
 
 
+def test_page_fingerprint_changes_with_footnote_appearance_guidance() -> None:
+    page = _page()
+    provider = ProviderDescriptor(provider="fake", model="fake-v1")
+    original = fingerprints.page_input_fingerprint(
+        page=page,
+        settings=TranslationSettings(),
+        provider=provider,
+        prompt="page prompt",
+    )
+    changed = fingerprints.page_input_fingerprint(
+        page=page,
+        settings=TranslationSettings(
+            footnote_appearance_instructions="Small type below a short rule."
+        ),
+        provider=provider,
+        prompt="page prompt",
+    )
+
+    assert changed != original
+
+
 def test_table_fingerprint_includes_prompt_first_pass_and_target_metadata() -> None:
     page = _page()
     settings = TranslationSettings(previous_page_context_count=2)

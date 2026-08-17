@@ -33,6 +33,8 @@ target_language = "English"
 # One of: "faithful", "balanced", "readable"
 style = "balanced"
 custom_instructions = ""
+# Optional visual guidance supplied to the model for recognizing this corpus's footnotes.
+footnote_appearance_instructions = ""
 preserve_names = true
 preserve_citations = true
 mark_uncertain_terms = true
@@ -62,6 +64,7 @@ max_concurrent_jobs = 1
 max_pdf_pages = 500
 max_glossary_entries = 500
 max_term_characters = 500
+max_instruction_characters = 4000
 status_poll_interval_ms = 1000
 # Retry a stopped page automatically for new web jobs. The UI can override the default.
 auto_continue_default = false

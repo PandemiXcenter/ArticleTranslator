@@ -95,6 +95,9 @@ const jobModelSelect = document.querySelector("#job-model-select");
 const jobTranslationStyle = document.querySelector("#job-translation-style");
 const previousPageContextCount = document.querySelector("#previous-page-context-count");
 const pageImageDpi = document.querySelector("#page-image-dpi");
+const footnoteAppearanceInstructions = document.querySelector(
+  "#footnote-appearance-instructions",
+);
 const autoContinue = document.querySelector("#auto-continue");
 const autoContinueHelp = document.querySelector("#auto-continue-help");
 const jobSettingsError = document.querySelector("#job-settings-error");
@@ -523,6 +526,13 @@ function populateConfig(config) {
   jobTranslationStyle.value = translationStyle.value;
   previousPageContextCount.value = asText(translation.previous_page_context_count, "0");
   pageImageDpi.value = asText(config.extraction?.image_dpi, "150");
+  footnoteAppearanceInstructions.value = asText(
+    translation.footnote_appearance_instructions,
+  );
+  const maxInstructionCharacters = Number(config.limits?.max_instruction_characters);
+  if (Number.isInteger(maxInstructionCharacters)) {
+    footnoteAppearanceInstructions.maxLength = maxInstructionCharacters;
+  }
   autoContinue.checked = Boolean(config.automation?.auto_continue_default);
   const autoContinueAttempts = Number(config.automation?.auto_continue_attempts) || 1;
   autoContinueHelp.textContent =
@@ -587,6 +597,7 @@ function validateJobSettings() {
 
   const contextCount = Number(previousPageContextCount.value);
   const imageDpi = Number(pageImageDpi.value);
+  const footnoteInstructions = footnoteAppearanceInstructions.value.trim();
   previousPageContextCount.removeAttribute("aria-invalid");
   pageImageDpi.removeAttribute("aria-invalid");
   if (!Number.isInteger(contextCount) || contextCount < 0 || contextCount > 10) {
@@ -599,6 +610,21 @@ function validateJobSettings() {
     setInlineError(jobSettingsError, "Page image resolution must be a whole number from 72 to 600 DPI.");
     return null;
   }
+  const maxInstructionCharacters = Number(
+    state.config?.limits?.max_instruction_characters,
+  );
+  if (
+    Number.isInteger(maxInstructionCharacters) &&
+    footnoteInstructions.length > maxInstructionCharacters
+  ) {
+    footnoteAppearanceInstructions.setAttribute("aria-invalid", "true");
+    setInlineError(
+      jobSettingsError,
+      `Footnote guidance must be ${maxInstructionCharacters} characters or fewer.`,
+    );
+    return null;
+  }
+  footnoteAppearanceInstructions.removeAttribute("aria-invalid");
   setInlineError(jobSettingsError, "");
 
   const enteredKey = geminiApiKey.value.trim() || state.sessionApiKey;
@@ -616,6 +642,7 @@ function validateJobSettings() {
       source_language: sourceLanguage,
       target_language: targetLanguage,
       style: jobTranslationStyle.value,
+      footnote_appearance_instructions: footnoteInstructions || null,
       previous_page_context_count: contextCount,
       image_dpi: imageDpi,
       auto_continue: autoContinue.checked,
@@ -629,6 +656,7 @@ function setStartBusy(isBusy) {
   addMappingButton.disabled = isBusy;
   fileInput.disabled = isBusy;
   autoContinue.disabled = isBusy;
+  footnoteAppearanceInstructions.disabled = isBusy;
   startButtonLabel.textContent = isBusy ? "Uploading PDF…" : "Start translation";
 }
 
@@ -1512,7 +1540,7 @@ function makeTranslationBlock(block, page, draftText) {
 
   if (block.footnote_description) {
     const description = createElement("details", "footnote-description");
-    description.append(createElement("summary", "", "Footnote description"));
+    description.append(createElement("summary", "", "Model footnote assessment"));
     description.append(
       createElement("p", "", `Appearance: ${asText(block.footnote_description.appearance)}`),
       createElement("p", "", `Handling: ${asText(block.footnote_description.handling)}`),

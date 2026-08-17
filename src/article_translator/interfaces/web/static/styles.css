@@ -282,6 +282,15 @@ a {
   color: var(--muted);
 }
 
+.job-wide-field {
+  grid-column: 1 / -1;
+}
+
+.job-wide-field textarea {
+  min-height: 5.5rem;
+  resize: vertical;
+}
+
 .form-footer {
   display: flex;
   gap: 2rem;

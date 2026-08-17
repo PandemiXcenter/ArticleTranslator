@@ -66,6 +66,22 @@ def translated_page(number: int, *blocks: TranslatedBlock) -> PageTranslation:
     )
 
 
+def test_translation_settings_normalize_footnote_appearance_instructions() -> None:
+    assert (
+        TranslationSettings(
+            footnote_appearance_instructions="  Small notes below a short rule.  "
+        ).footnote_appearance_instructions
+        == "Small notes below a short rule."
+    )
+    assert (
+        TranslationSettings(footnote_appearance_instructions="   ").footnote_appearance_instructions
+        is None
+    )
+
+    with pytest.raises(ValidationError, match="at most 4000"):
+        TranslationSettings(footnote_appearance_instructions="x" * 4_001)
+
+
 def test_generated_payload_requires_contiguous_reading_order() -> None:
     with pytest.raises(ValidationError, match="block order must be contiguous"):
         GeneratedPagePayload(

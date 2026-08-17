@@ -7,13 +7,13 @@ from importlib.resources import files
 from article_translator.domain.enums import BlockType, SegmentHandling
 from article_translator.domain.models import PageTranslation, TranslationSettings
 
-PROMPT_VERSION = "translate-page-v7"
+PROMPT_VERSION = "translate-page-v8"
 TABLE_PROMPT_VERSION = "reconstruct-tables-v1"
 
 
 @lru_cache(maxsize=1)
 def _prompt_preamble() -> str:
-    resource = files("article_translator.prompts").joinpath("translate_page_v7.md")
+    resource = files("article_translator.prompts").joinpath("translate_page_v8.md")
     return resource.read_text(encoding="utf-8").strip()
 
 

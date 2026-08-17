@@ -193,6 +193,7 @@ def test_index_and_public_config_never_expose_secret(tmp_path: Path) -> None:
     payload = public_config.json()
     assert payload["translation"]["source_language"] == "Danish"
     assert payload["translation"]["target_language"] == "English"
+    assert payload["translation"]["footnote_appearance_instructions"] is None
     assert payload["provider"]["model"] == "gemini-3.6-flash"
     assert payload["extraction"]["image_dpi"] == 150
     assert payload["automation"] == {
@@ -201,6 +202,7 @@ def test_index_and_public_config_never_expose_secret(tmp_path: Path) -> None:
     }
     assert "gemini-3.5-flash-lite" in payload["provider"]["selectable_models"]
     assert "review_context_pages" not in payload["limits"]
+    assert payload["limits"]["max_instruction_characters"] == 4_000
 
 
 def test_blank_environment_key_does_not_prevent_settings_page(
@@ -343,7 +345,7 @@ def test_review_frontend_mounts_all_pages_and_uses_delegated_handlers(
     assert "section-type-select" in javascript
     assert "footnote-owner-select" in javascript
     assert "footnote-anchor-input" in javascript
-    assert "Footnote description" in javascript
+    assert "Model footnote assessment" in javascript
     assert "printed reference" in javascript
     assert "Marker after character" in javascript
     assert "function footnoteEntrypointsForBlock" in javascript
@@ -355,6 +357,8 @@ def test_review_frontend_mounts_all_pages_and_uses_delegated_handlers(
     assert 'data-testid="previous-page-context-count"' in html
     assert 'data-testid="page-image-dpi"' in html
     assert 'data-testid="auto-continue"' in html
+    assert 'data-testid="footnote-appearance-instructions"' in html
+    assert "footnote_appearance_instructions" in javascript
     assert "auto_continue: autoContinue.checked" in javascript
     assert 'remove.dataset.action = "delete-review"' in javascript
     assert 'reviewComplete\n        ? "Read"' in javascript
@@ -467,6 +471,7 @@ def test_job_uses_selected_languages_model_style_and_session_key(
         "source_language": "Latin",
         "target_language": "German",
         "style": "faithful",
+        "footnote_appearance_instructions": "Tiny notes below a rule.",
         "previous_page_context_count": 4,
         "image_dpi": 225,
         "auto_continue": True,
@@ -493,6 +498,7 @@ def test_job_uses_selected_languages_model_style_and_session_key(
     assert runtime_config.translation.source_language == "Latin"
     assert runtime_config.translation.target_language == "German"
     assert runtime_config.translation.style.value == "faithful"
+    assert runtime_config.translation.footnote_appearance_instructions == "Tiny notes below a rule."
     assert runtime_config.translation.previous_page_context_count == 4
     assert runtime_config.extraction.image_dpi == 225
     submitted_secret = manager.submissions[0][5]
@@ -532,6 +538,41 @@ def test_job_rejects_model_outside_config_allowlist(tmp_path: Path) -> None:
     assert response.status_code == 422
     assert manager.submissions == []
     assert not config.paths.artifacts_dir.exists()
+
+
+def test_job_rejects_footnote_guidance_above_configured_limit(tmp_path: Path) -> None:
+    config = configured_for_tmp(tmp_path)
+    config = config.model_copy(
+        update={"web": config.web.model_copy(update={"max_instruction_characters": 10})}
+    )
+    manager = RecordingJobManager()
+    app = create_app(config, job_manager=cast(WebJobManager, manager))
+
+    with TestClient(app) as client:
+        client.get("/")
+        response = client.post(
+            "/api/jobs",
+            files={"pdf": ("article.pdf", b"%PDF-1.7", "application/pdf")},
+            data={
+                "glossary": "[]",
+                "settings": json.dumps(
+                    {
+                        "model": config.provider.gemini.model,
+                        "source_language": "Danish",
+                        "target_language": "English",
+                        "style": "balanced",
+                        "footnote_appearance_instructions": "x" * 11,
+                        "previous_page_context_count": 2,
+                        "image_dpi": 150,
+                        "auto_continue": False,
+                    }
+                ),
+            },
+            headers={"X-CSRF-Token": client.cookies["at_csrf"]},
+        )
+
+    assert response.status_code == 422
+    assert manager.submissions == []
 
 
 @pytest.mark.parametrize(

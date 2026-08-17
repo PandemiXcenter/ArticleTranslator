@@ -59,6 +59,8 @@ Implemented:
 - functional footnote classification with printed-reference provenance, required
   appearance/handling descriptions, and explicit continuation metadata for short,
   full-page, and cross-page notes;
+- TOML-defaulted per-job guidance in simple terms for how footnotes appear, used
+  as an inspection hint while the rendered page remains decisive;
 - required body-paragraph continuation state, next-page confirmation, and
   pipeline-owned links to the preceding page's final body block;
 - one-paragraph Markdown projection for confirmed cross-page fragments while

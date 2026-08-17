@@ -172,7 +172,7 @@ Never overload the phrase “page number”:
 
 Every request contains exactly one current-page PNG, that page's complete
 Markdown, and the fully resolved translation settings. The primary pass uses
-`translate-page-v7`. When that pass tags at least one table or table-like region,
+`translate-page-v8`. When that pass tags at least one table or table-like region,
 the pipeline immediately makes one additional batched request for that page using
 `reconstruct-tables-v1`; it sends the same PNG and complete page MarkItDown/OCR,
 plus the first-pass segmentation and exact table targets. Multiple table regions
@@ -191,6 +191,11 @@ mappings are authoritative; they are not suggestions inferred by the model.
 Input language, output language, model, and style can be selected for one web
 job. Their initial values and the selectable model allowlist come from TOML, and
 the resolved values participate in run provenance and checkpoint identity.
+The same boundary accepts optional user-authored `footnote_appearance_instructions`
+describing likely placement, typography, rules, or markers in simple terms. The
+prompt treats this as an inspection hint while keeping the page image authoritative;
+the model's per-note appearance field records observed evidence rather than copying
+the hint.
 
 ### Previous-page continuity context
 

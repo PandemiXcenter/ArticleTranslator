@@ -66,6 +66,7 @@ def test_prompt_contains_resolved_settings_and_delimited_page_markdown() -> None
         target_language="English",
         style=TranslationStyle.FAITHFUL,
         glossary={"Kolera": "cholera"},
+        footnote_appearance_instructions="Small notes below a short horizontal rule.",
     )
 
     prompt = build_page_prompt(
@@ -78,6 +79,9 @@ def test_prompt_contains_resolved_settings_and_delimited_page_markdown() -> None
     assert "Physical PDF page: 7" in prompt
     assert '"style": "faithful"' in prompt
     assert '"Kolera": "cholera"' in prompt
+    assert '"footnote_appearance_instructions": "Small notes below a short horizontal rule."' in (
+        prompt
+    )
     assert "authoritative" in prompt
     assert "one structured block variant" in prompt
     assert "dedicated second pass" in prompt
@@ -98,6 +102,9 @@ def test_prompt_contains_resolved_settings_and_delimited_page_markdown() -> None
     assert "fn-p<START_PAGE>-n<SEQUENCE>" in prompt
     assert "appearance" in prompt
     assert "handling" in prompt
+    assert "optional visual guidance written by the" in prompt
+    assert "current page image as decisive" in prompt
+    assert "rather than repeating the user's hint" in prompt
     assert "owner_review_required=true" in prompt
     assert "SOURCE_MARKDOWN_START\n# Om Kolera\nSOURCE_MARKDOWN_END" in prompt
 
