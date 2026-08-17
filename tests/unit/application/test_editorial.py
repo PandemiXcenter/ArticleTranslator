@@ -626,6 +626,38 @@ def test_reviewed_latex_converts_canonical_gfm_table_without_floating() -> None:
     assert "\\begin{table}" not in latex
 
 
+def test_reviewed_latex_converts_gfm_bold_inside_table_cells() -> None:
+    machine = (
+        "| **Date & unit** | Result |\n"
+        "| --- | --- |\n"
+        "| **3 July** | before **Cases_#1 & 2** and **more** |\n"
+        "| unfinished **mark | plain |\n"
+        r"| \*\* | Literal marker |"
+    )
+    table = TranslatedBlock(
+        block_id="p0001-b0001",
+        original_page_number=1,
+        order=1,
+        type=BlockType.TABLE,
+        source_text=None,
+        translated_text=machine,
+        segment_handling=SegmentHandling.TABLE_RECONSTRUCTION,
+        manual_insertion_reason=ManualInsertionReason.TABLE,
+        continuation=SegmentContinuation.COMPLETE,
+    )
+
+    latex = EditorialService(MemoryRevisionRepository()).compile_reviewed_latex(
+        _document(table),
+        RUN_ID,
+        MarkdownExportSettings(include_page_comments=False),
+    )
+
+    assert "\\textbf{Date \\& unit} & \\textbf{Result}" in latex
+    assert "\\textbf{3 July} & before \\textbf{Cases\\_\\#1 \\& 2} and \\textbf{more}" in latex
+    assert "unfinished **mark & plain" in latex
+    assert "** & Literal marker" in latex
+
+
 def test_reviewed_latex_places_owned_footnote_inline() -> None:
     owner = _block(
         "p0001-b0001",

@@ -253,7 +253,9 @@ A continued table still produces one page-local table per physical page.
 The compiler emits each reconstructed or reviewer-entered table exactly at its
 ordered block position between surrounding paragraphs. An invisible
 `table-placement: [H!]` comment records here-placement, physical page, and block
-identity without wrapping the GFM table in a floating layout construct.
+identity without wrapping the GFM table in a floating layout construct. GFM
+`**strong**` spans inside table cells are projected to `\textbf{...}` by the
+LaTeX exporter; escaped literal asterisks remain literal.
 
 Figures are not sent through the table follow-up. They remain ordered, text-free
 manual-insertion blocks for the reviewer.

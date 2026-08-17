@@ -426,9 +426,7 @@ def _latex_table(block: TranslatedBlock, value: str) -> str:
     specification = "@{}" + "".join(columns) + "@{}"
     rendered_rows: list[str] = []
     for index, row in enumerate(rows):
-        cells = [
-            f"\\textbf{{{_latex_text(cell)}}}" if index == 0 else _latex_text(cell) for cell in row
-        ]
+        cells = [_latex_table_cell(cell, header=index == 0) for cell in row]
         rendered_rows.append(" & ".join(cells) + " \\\\")
         if index == 0:
             rendered_rows.append(r"\midrule")
@@ -441,6 +439,63 @@ def _latex_table(block: TranslatedBlock, value: str) -> str:
         "\\bottomrule\n"
         "\\end{longtable}"
     )
+
+
+def _latex_table_cell(value: str, *, header: bool) -> str:
+    rendered = _latex_gfm_strong(value, render_emphasis=not header)
+    return f"\\textbf{{{rendered}}}" if header else rendered
+
+
+def _latex_gfm_strong(value: str, *, render_emphasis: bool = True) -> str:
+    """Render the small GFM inline subset permitted in reconstructed table cells."""
+
+    parts: list[str] = []
+    plain: list[str] = []
+
+    def flush_plain() -> None:
+        if plain:
+            parts.append(_latex_inline_fragment("".join(plain)))
+            plain.clear()
+
+    cursor = 0
+    while cursor < len(value):
+        if value[cursor] == "\\" and cursor + 1 < len(value):
+            escaped_character = value[cursor + 1]
+            if escaped_character in _MARKDOWN_ESCAPABLE_CHARACTERS:
+                plain.append(escaped_character)
+                cursor += 2
+                continue
+        if value.startswith("**", cursor):
+            closing = _find_unescaped_strong_close(value, cursor + 2)
+            if closing is not None:
+                content = value[cursor + 2 : closing]
+                if content and not content[0].isspace() and not content[-1].isspace():
+                    flush_plain()
+                    rendered_content = _latex_gfm_strong(content, render_emphasis=False)
+                    parts.append(
+                        f"\\textbf{{{rendered_content}}}" if render_emphasis else rendered_content
+                    )
+                    cursor = closing + 2
+                    continue
+        plain.append(value[cursor])
+        cursor += 1
+    flush_plain()
+    return "".join(parts)
+
+
+def _find_unescaped_strong_close(value: str, start: int) -> int | None:
+    cursor = start
+    while cursor < len(value) - 1:
+        if value[cursor] == "\\" and cursor + 1 < len(value):
+            cursor += 2
+            continue
+        if value.startswith("**", cursor):
+            return cursor
+        cursor += 1
+    return None
+
+
+_MARKDOWN_ESCAPABLE_CHARACTERS = frozenset("!\\\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
 
 
 def _parse_gfm_table(value: str) -> tuple[list[str], list[list[str]], int] | None:

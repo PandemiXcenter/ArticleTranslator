@@ -162,7 +162,9 @@ loopback host or port. The interface is organized as an internal workbench:
 PDF export requires the `xelatex` executable configured under `[pdf_export]`.
 Markdown and plain-text downloads do not require TeX. PDF source is projected
 directly from canonical blocks and effective revisions, compiled with shell
-escape disabled, and removed with its temporary compilation directory.
+escape disabled, and removed with its temporary compilation directory. Bold
+GFM spans inside table cells are converted to native LaTeX bold commands rather
+than leaving `**` markers in the typeset document.
 
 For each request, the configured provider receives one current-page image and
 that page's complete extracted Markdown. A table-bearing page therefore makes a
