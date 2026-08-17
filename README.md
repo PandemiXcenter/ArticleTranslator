@@ -148,7 +148,9 @@ loopback host or port. The interface is organized as an internal workbench:
   can jump to the first marked instance. Each translated section has an editable
   type; footnotes additionally expose their stable identity, printed-reference
   evidence, appearance/handling description, owner-section selector, and exact
-  inline marker character position. An unfinished article offers **Review**;
+  inline marker character position. The owner editor renders that entrypoint as a
+  display-only superscript which is excluded from saved editorial text. An
+  unfinished article offers **Review**;
   a fully accepted article offers **Read**. The export menu downloads XeLaTeX
   source, Markdown, plain text, or a PDF typeset locally with XeLaTeX. **Delete**
   removes the selected immutable translation run together with its revisions and

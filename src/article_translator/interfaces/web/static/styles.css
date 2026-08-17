@@ -1031,6 +1031,21 @@ progress::-moz-progress-bar {
   font-weight: 760;
 }
 
+.footnote-entrypoint-marker {
+  display: inline-block;
+  margin: 0 0.08em;
+  padding: 0.04em 0.22em;
+  border: 1px solid rgb(156 63 40 / 38%);
+  border-radius: 0.2rem;
+  color: var(--accent);
+  background: rgb(156 63 40 / 9%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.68em;
+  font-weight: 760;
+  line-height: 1;
+  user-select: none;
+}
+
 .section-controls select,
 .section-controls input {
   width: 100%;

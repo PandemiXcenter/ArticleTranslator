@@ -11,6 +11,7 @@ const state = {
   uncertaintyGroups: [],
   reviewPages: [],
   reviewDrafts: new Map(),
+  footnoteEntrypointsByOwner: new Map(),
   sourcePageNumber: null,
   allowPositionPersistence: false,
   lastPersistedPage: null,
@@ -1023,8 +1024,51 @@ function makeUncertaintyMark(text, entry) {
   return mark;
 }
 
+function footnoteEntrypointsForBlock(block) {
+  return state.footnoteEntrypointsByOwner.get(asText(block.block_id)) || [];
+}
+
+function makeFootnoteEntrypointMarker(entrypoint) {
+  const marker = createElement("sup", "footnote-entrypoint-marker", entrypoint.text);
+  marker.dataset.editorDisplayOnly = "true";
+  marker.dataset.footnoteId = entrypoint.identity;
+  marker.setAttribute("contenteditable", "false");
+  marker.setAttribute("role", "note");
+  marker.setAttribute("aria-label", `Footnote entrypoint ${entrypoint.identity}`);
+  marker.title = `Footnote entrypoint ${entrypoint.identity}`;
+  return marker;
+}
+
+function appendTextWithFootnoteEntrypoints(
+  container,
+  codePoints,
+  start,
+  end,
+  entrypoints,
+) {
+  let cursor = start;
+  for (const entrypoint of entrypoints) {
+    const offset = Math.min(Math.max(entrypoint.offset, start), end);
+    if (offset < cursor) {
+      continue;
+    }
+    if (offset > cursor) {
+      container.append(document.createTextNode(codePoints.slice(cursor, offset).join("")));
+    }
+    container.append(makeFootnoteEntrypointMarker(entrypoint));
+    cursor = offset;
+  }
+  if (cursor < end) {
+    container.append(document.createTextNode(codePoints.slice(cursor, end).join("")));
+  }
+}
+
 function renderHighlightedText(container, text, block) {
   const codePoints = Array.from(text);
+  const entrypoints = footnoteEntrypointsForBlock(block).map((entrypoint) => ({
+    ...entrypoint,
+    offset: Math.min(entrypoint.offset, codePoints.length),
+  }));
   const ranges = [];
   const handled = new Set();
   for (const uncertainty of unresolvedUncertainties(block)) {
@@ -1064,22 +1108,50 @@ function renderHighlightedText(container, text, block) {
   let cursor = 0;
   for (const range of ranges) {
     if (range.start > cursor) {
-      container.append(
-        document.createTextNode(codePoints.slice(cursor, range.start).join("")),
+      appendTextWithFootnoteEntrypoints(
+        container,
+        codePoints,
+        cursor,
+        range.start,
+        entrypoints.filter(
+          (entrypoint) => entrypoint.offset >= cursor && entrypoint.offset < range.start,
+        ),
       );
     }
-    container.append(
-      makeUncertaintyMark(
-        codePoints.slice(range.start, range.end).join(""),
-        range.entry,
+    const uncertaintyMark = makeUncertaintyMark(
+      codePoints.slice(range.start, range.end).join(""),
+      range.entry,
+    );
+    uncertaintyMark.replaceChildren();
+    appendTextWithFootnoteEntrypoints(
+      uncertaintyMark,
+      codePoints,
+      range.start,
+      range.end,
+      entrypoints.filter(
+        (entrypoint) =>
+          entrypoint.offset >= range.start && entrypoint.offset < range.end,
       ),
     );
+    container.append(uncertaintyMark);
     cursor = range.end;
   }
-  if (cursor < codePoints.length || codePoints.length === 0) {
-    container.append(document.createTextNode(codePoints.slice(cursor).join("")));
-  }
+  appendTextWithFootnoteEntrypoints(
+    container,
+    codePoints,
+    cursor,
+    codePoints.length,
+    entrypoints.filter((entrypoint) => entrypoint.offset >= cursor),
+  );
   return handled;
+}
+
+function editorPlainText(editor) {
+  const copy = editor.cloneNode(true);
+  for (const marker of copy.querySelectorAll("[data-editor-display-only='true']")) {
+    marker.remove();
+  }
+  return copy.textContent || "";
 }
 
 function insertPlainTextAtSelection(editor, text) {
@@ -1103,7 +1175,7 @@ function insertPlainTextAtSelection(editor, text) {
 }
 
 function setBlockDirty(blockElement, editor, effectiveText) {
-  const dirty = (editor.textContent || "") !== effectiveText;
+  const dirty = editorPlainText(editor) !== effectiveText;
   blockElement.classList.toggle("is-dirty", dirty);
   editor.setAttribute("aria-invalid", "false");
   return dirty;
@@ -1116,7 +1188,7 @@ function recordEditorDraft(editor) {
   if (!blockElement || !entry) {
     return;
   }
-  const editorialText = editor.textContent || "";
+  const editorialText = editorPlainText(editor);
   const effectiveText = asText(entry.block.effective_text, entry.block.machine_text);
   if (setBlockDirty(blockElement, editor, effectiveText)) {
     state.reviewDrafts.set(blockId, editorialText);
@@ -1549,7 +1621,7 @@ function captureDrafts() {
     if (!editor || !entry) {
       continue;
     }
-    const editorialText = editor.textContent || "";
+    const editorialText = editorPlainText(editor);
     if (editorialText !== asText(entry.block.effective_text, entry.block.machine_text)) {
       state.reviewDrafts.set(blockId, editorialText);
     } else {
@@ -1563,6 +1635,7 @@ function buildReviewIndexes(pages) {
   state.blockIndex = new Map();
   state.uncertaintyIndex = new Map();
   state.uncertaintyGroups = [];
+  state.footnoteEntrypointsByOwner = new Map();
   for (const page of pages) {
     for (const block of Array.isArray(page.blocks) ? page.blocks : []) {
       block.base_revision = Math.max(0, Number(block.base_revision) || 0);
@@ -1577,6 +1650,34 @@ function buildReviewIndexes(pages) {
         state.uncertaintyIndex.set(id, { ...entry, uncertainty });
       });
     }
+  }
+  const identitiesByOwner = new Map();
+  for (const { block } of state.blockIndex.values()) {
+    const ownerId = asText(block.footnote_owner_block_id);
+    if (block.type !== "footnote" || !ownerId) {
+      continue;
+    }
+    const identity = asText(block.footnote_id?.id, block.block_id);
+    const seen = identitiesByOwner.get(ownerId) || new Set();
+    if (seen.has(identity)) {
+      continue;
+    }
+    const offset = Number(block.footnote_anchor_offset);
+    if (!Number.isInteger(offset) || offset < 0) {
+      continue;
+    }
+    seen.add(identity);
+    identitiesByOwner.set(ownerId, seen);
+    const entrypoints = state.footnoteEntrypointsByOwner.get(ownerId) || [];
+    entrypoints.push({
+      identity,
+      offset,
+      text: asText(block.footnote_id?.text, "†"),
+    });
+    state.footnoteEntrypointsByOwner.set(ownerId, entrypoints);
+  }
+  for (const entrypoints of state.footnoteEntrypointsByOwner.values()) {
+    entrypoints.sort((left, right) => left.offset - right.offset);
   }
 }
 
@@ -1828,7 +1929,7 @@ function currentReviewVersion(response, oldVersion) {
 }
 
 async function saveBlock(block, blockElement, editor, status, buttons, message) {
-  const editorialText = (editor.textContent || "").trim();
+  const editorialText = editorPlainText(editor).trim();
   if (!editorialText) {
     editor.setAttribute("aria-invalid", "true");
     message.textContent = "Translation cannot be blank.";

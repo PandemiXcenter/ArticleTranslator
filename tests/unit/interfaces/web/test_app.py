@@ -346,6 +346,10 @@ def test_review_frontend_mounts_all_pages_and_uses_delegated_handlers(
     assert "Footnote description" in javascript
     assert "printed reference" in javascript
     assert "Marker after character" in javascript
+    assert "function footnoteEntrypointsForBlock" in javascript
+    assert "footnote-entrypoint-marker" in javascript
+    assert "function editorPlainText" in javascript
+    assert "data-editor-display-only" in javascript
     assert 'translationContent.addEventListener("change", handleReviewControlChange)' in javascript
     assert "function deleteLibraryReview" in javascript
     assert 'data-testid="previous-page-context-count"' in html
