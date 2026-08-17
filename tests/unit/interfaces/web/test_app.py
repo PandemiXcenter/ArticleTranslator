@@ -172,6 +172,7 @@ def test_index_and_public_config_never_expose_secret(tmp_path: Path) -> None:
         "Auto continue",
         "Save on this computer",
         "Original page",
+        "Original page zoom",
         "Translated text",
         "Translate One",
         "Translate All",
@@ -199,6 +200,10 @@ def test_index_and_public_config_never_expose_secret(tmp_path: Path) -> None:
     assert payload["automation"] == {
         "auto_continue_default": False,
         "auto_continue_attempts": 1,
+    }
+    assert payload["review"] == {
+        "zoom_levels": [100, 125, 150, 175, 200],
+        "zoom_default_percent": 100,
     }
     assert "gemini-3.5-flash-lite" in payload["provider"]["selectable_models"]
     assert "review_context_pages" not in payload["limits"]
@@ -319,6 +324,7 @@ def test_review_frontend_mounts_all_pages_and_uses_delegated_handlers(
     with TestClient(app) as client:
         html = client.get("/").text
         javascript = client.get("/assets/app.js").text
+        styles = client.get("/assets/styles.css").text
 
     assert "review_context_pages" not in javascript
     assert "function renderAllReviewPages" in javascript
@@ -353,11 +359,17 @@ def test_review_frontend_mounts_all_pages_and_uses_delegated_handlers(
     assert "function editorPlainText" in javascript
     assert "data-editor-display-only" in javascript
     assert 'translationContent.addEventListener("change", handleReviewControlChange)' in javascript
+    assert 'reviewEditor.addEventListener("change", handleReviewToolbarChange)' in javascript
     assert "function deleteLibraryReview" in javascript
     assert 'data-testid="previous-page-context-count"' in html
     assert 'data-testid="page-image-dpi"' in html
     assert 'data-testid="auto-continue"' in html
     assert 'data-testid="footnote-appearance-instructions"' in html
+    assert 'data-testid="review-zoom-select"' in html
+    assert "function setReviewZoom" in javascript
+    assert "state.reviewZoomPercent = normalized" in javascript
+    assert '--review-page-zoom", String(normalized / 100)' in javascript
+    assert "transform: scale(var(--review-page-zoom, 1))" in styles
     assert "footnote_appearance_instructions" in javascript
     assert "auto_continue: autoContinue.checked" in javascript
     assert 'remove.dataset.action = "delete-review"' in javascript

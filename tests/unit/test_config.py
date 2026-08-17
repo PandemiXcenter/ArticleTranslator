@@ -35,6 +35,8 @@ def test_default_toml_is_the_complete_non_secret_configuration() -> None:
     assert config.web.auto_continue_default is False
     assert config.web.auto_continue_attempts == 1
     assert config.web.max_instruction_characters == 4_000
+    assert config.web.review_zoom_levels == [100, 125, 150, 175, 200]
+    assert config.web.review_zoom_default_percent == 100
 
 
 def test_footnote_appearance_config_is_required_and_bounded(tmp_path: Path) -> None:
@@ -180,3 +182,32 @@ def test_auto_continue_config_is_required_and_bounded(tmp_path: Path) -> None:
         load_project_config(missing)
     with pytest.raises(ConfigurationError, match="less than or equal to 10"):
         load_project_config(invalid)
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [
+        ("review_zoom_levels = []", "must not be empty"),
+        ("review_zoom_levels = [100, 100]", "must be unique"),
+        ("review_zoom_levels = [49, 100]", "values from 50 to 400"),
+        ("review_zoom_levels = [125, 100]", "ascending order"),
+        (
+            "review_zoom_levels = [125, 150]",
+            "review_zoom_default_percent must appear",
+        ),
+    ],
+)
+def test_review_zoom_choices_are_strict(
+    tmp_path: Path,
+    replacement: str,
+    message: str,
+) -> None:
+    source = Path("config/default.toml").read_text(encoding="utf-8")
+    path = tmp_path / "invalid-review-zoom.toml"
+    path.write_text(
+        source.replace("review_zoom_levels = [100, 125, 150, 175, 200]", replacement),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match=message):
+        load_project_config(path)

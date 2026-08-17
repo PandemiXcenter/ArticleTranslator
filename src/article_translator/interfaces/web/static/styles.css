@@ -908,6 +908,26 @@ progress::-moz-progress-bar {
   font-weight: 700;
 }
 
+.source-pane-controls {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.source-pane-controls label {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.compact-select {
+  min-width: 4.5rem;
+  padding: 0.3rem 0.45rem;
+}
+
 .document-scroll {
   min-height: 0;
   scrollbar-color: var(--accent) var(--canvas);
@@ -938,6 +958,8 @@ progress::-moz-progress-bar {
   background: var(--surface);
   object-fit: contain;
   object-position: center top;
+  transform: scale(var(--review-page-zoom, 1));
+  transform-origin: center top;
 }
 
 .translation-scroll {

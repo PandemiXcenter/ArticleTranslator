@@ -140,7 +140,9 @@ loopback host or port. The interface is organized as an internal workbench:
   under the configured artifact root. A stable translation-run ID reopens the
   same canonical artifacts after a browser or server restart. The complete
   translated document is mounted and scrollable; only the active physical
-  page's original PNG is fetched and displayed alongside it. The last physical
+  page's original PNG is fetched and displayed alongside it. The original-page
+  zoom control keeps its selected amount while the translated text moves through
+  subsequent pages. The last physical
   page visited is stored per run, so the catalog can offer **Continue from page
   X**. Edits create append-only revisions without changing machine output.
   Uncertain terms are visibly marked and can be corrected once or, when multiple

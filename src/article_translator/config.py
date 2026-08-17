@@ -75,8 +75,24 @@ class WebConfig(ConfigModel):
     max_term_characters: int = Field(ge=1, le=4_000)
     max_instruction_characters: int = Field(ge=1, le=4_000)
     status_poll_interval_ms: int = Field(ge=250, le=30_000)
+    review_zoom_levels: list[int]
+    review_zoom_default_percent: int = Field(ge=50, le=400)
     auto_continue_default: bool
     auto_continue_attempts: int = Field(ge=1, le=10)
+
+    @model_validator(mode="after")
+    def review_zoom_is_selectable_and_bounded(self) -> Self:
+        if not self.review_zoom_levels:
+            raise ValueError("review_zoom_levels must not be empty")
+        if len(self.review_zoom_levels) != len(set(self.review_zoom_levels)):
+            raise ValueError("review_zoom_levels must be unique")
+        if any(level < 50 or level > 400 for level in self.review_zoom_levels):
+            raise ValueError("review_zoom_levels must contain values from 50 to 400")
+        if self.review_zoom_levels != sorted(self.review_zoom_levels):
+            raise ValueError("review_zoom_levels must be in ascending order")
+        if self.review_zoom_default_percent not in self.review_zoom_levels:
+            raise ValueError("review_zoom_default_percent must appear in review_zoom_levels")
+        return self
 
 
 class ConfiguredTranslationSettings(TranslationSettings):

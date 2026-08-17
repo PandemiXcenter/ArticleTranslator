@@ -149,6 +149,10 @@ def create_app(
                 "auto_continue_default": config.web.auto_continue_default,
                 "auto_continue_attempts": config.web.auto_continue_attempts,
             },
+            "review": {
+                "zoom_levels": config.web.review_zoom_levels,
+                "zoom_default_percent": config.web.review_zoom_default_percent,
+            },
             "api_key_configured": (
                 _environment_api_key_configured() or local_secret_store.has_gemini_api_key()
             ),

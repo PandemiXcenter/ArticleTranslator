@@ -484,7 +484,9 @@ The browser interface is intentionally operational rather than promotional:
   review projection, and mounts the full translated document. Only the translated
   pane is user-scrollable. Its current `original_page_number` fetches and displays
   that one physical page's original PNG; the browser does not mount every source
-  image. The current page is persisted in the run-scoped position sidecar so a
+  image. A TOML-defined original-page zoom selector retains its in-memory choice
+  across those page-image swaps without making the source pane independently
+  scrollable. The current page is persisted in the run-scoped position sidecar so a
   later session can continue there. Generated block, uncertainty, editor, and
   mapping controls use stable container-level delegated handlers rather than one
   listener per element. Each block distinguishes immutable machine translation

@@ -472,9 +472,20 @@
             <section class="review-pane source-pane" aria-labelledby="source-heading">
               <header class="pane-heading">
                 <h2 id="source-heading">Original page</h2>
-                <a id="full-size-page-link" href="#" target="_blank" rel="noopener">
-                  Open full size
-                </a>
+                <div class="source-pane-controls">
+                  <label for="review-zoom-select">
+                    Zoom
+                    <select
+                      id="review-zoom-select"
+                      class="compact-select"
+                      data-testid="review-zoom-select"
+                      aria-label="Original page zoom"
+                    ></select>
+                  </label>
+                  <a id="full-size-page-link" href="#" target="_blank" rel="noopener">
+                    Open full size
+                  </a>
+                </div>
               </header>
               <div
                 id="source-scroll"

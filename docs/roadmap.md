@@ -165,6 +165,8 @@ Implemented:
   browser or server restart;
 - the full translated document mounted for review, with translated-pane-driven
   synchronization that fetches and displays only the active original page PNG;
+- a TOML-defined original-page zoom selector whose amount persists across page
+  changes during validation;
 - delegated generated-control events;
 - block editing and validation backed by append-only revisions;
 - visible provenance distinguishing machine translations (including reconstructed

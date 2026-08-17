@@ -13,6 +13,7 @@ const state = {
   reviewDrafts: new Map(),
   footnoteEntrypointsByOwner: new Map(),
   sourcePageNumber: null,
+  reviewZoomPercent: null,
   allowPositionPersistence: false,
   lastPersistedPage: null,
   positionQueue: Promise.resolve(),
@@ -74,6 +75,7 @@ const translationContent = document.querySelector("#translation-content");
 const sourcePageLabel = document.querySelector("#source-page-label");
 const sourcePageImage = document.querySelector("#source-page-image");
 const fullSizePageLink = document.querySelector("#full-size-page-link");
+const reviewZoomSelect = document.querySelector("#review-zoom-select");
 const uncertaintyDialog = document.querySelector("#uncertainty-dialog");
 const uncertaintyListButton = document.querySelector("#uncertainty-list-button");
 const uncertaintyListDialog = document.querySelector("#uncertainty-list-dialog");
@@ -538,6 +540,21 @@ function populateConfig(config) {
   autoContinueHelp.textContent =
     `Automatically retry a failed page up to ${autoContinueAttempts} ` +
     `${autoContinueAttempts === 1 ? "time" : "times"} before stopping.`;
+
+  const zoomLevels = Array.isArray(config.review?.zoom_levels)
+    ? config.review.zoom_levels.filter((value) => Number.isInteger(value))
+    : [];
+  const configuredZoom = Number(config.review?.zoom_default_percent);
+  reviewZoomSelect.replaceChildren();
+  for (const level of zoomLevels) {
+    const option = createElement("option", "", `${level}%`);
+    option.value = String(level);
+    reviewZoomSelect.append(option);
+  }
+  const initialZoom = zoomLevels.includes(state.reviewZoomPercent)
+    ? state.reviewZoomPercent
+    : configuredZoom;
+  setReviewZoom(initialZoom);
 
   updateApiKeyStatus(
     Boolean(config.api_key_configured),
@@ -1332,6 +1349,26 @@ function pageImageUrl(pageNumber) {
   return `/api/jobs/${encodeURIComponent(state.jobId)}/pages/${encodeURIComponent(
     pageNumber,
   )}/image`;
+}
+
+function setReviewZoom(percent) {
+  const allowedLevels = Array.isArray(state.config?.review?.zoom_levels)
+    ? state.config.review.zoom_levels
+    : [];
+  const normalized = Number(percent);
+  if (!Number.isInteger(normalized) || !allowedLevels.includes(normalized)) {
+    return;
+  }
+  state.reviewZoomPercent = normalized;
+  reviewZoomSelect.value = String(normalized);
+  sourcePageImage.style.setProperty("--review-page-zoom", String(normalized / 100));
+}
+
+function handleReviewToolbarChange(event) {
+  const target = event.target instanceof HTMLSelectElement ? event.target : null;
+  if (target?.matches("#review-zoom-select")) {
+    setReviewZoom(target.value);
+  }
 }
 
 function showSourcePage(page) {
@@ -2546,6 +2583,7 @@ translationContent.addEventListener("keydown", handleReviewKeydown);
 translationContent.addEventListener("input", handleReviewInput);
 translationContent.addEventListener("change", handleReviewControlChange);
 translationContent.addEventListener("paste", handleReviewPaste);
+reviewEditor.addEventListener("change", handleReviewToolbarChange);
 translationScroll.addEventListener("scroll", requestScrollSync, { passive: true });
 window.addEventListener("resize", requestScrollSync);
 

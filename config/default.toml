@@ -66,6 +66,9 @@ max_glossary_entries = 500
 max_term_characters = 500
 max_instruction_characters = 4000
 status_poll_interval_ms = 1000
+# Original-page zoom choices in the validation workspace. The selection persists across pages.
+review_zoom_levels = [100, 125, 150, 175, 200]
+review_zoom_default_percent = 100
 # Retry a stopped page automatically for new web jobs. The UI can override the default.
 auto_continue_default = false
 # Bound provider cost when Auto continue is enabled.
