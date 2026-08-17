@@ -7,13 +7,13 @@ from importlib.resources import files
 from article_translator.domain.enums import BlockType, SegmentHandling
 from article_translator.domain.models import PageTranslation, TranslationSettings
 
-PROMPT_VERSION = "translate-page-v6"
+PROMPT_VERSION = "translate-page-v7"
 TABLE_PROMPT_VERSION = "reconstruct-tables-v1"
 
 
 @lru_cache(maxsize=1)
 def _prompt_preamble() -> str:
-    resource = files("article_translator.prompts").joinpath("translate_page_v6.md")
+    resource = files("article_translator.prompts").joinpath("translate_page_v7.md")
     return resource.read_text(encoding="utf-8").strip()
 
 
@@ -102,7 +102,16 @@ def build_table_prompt(
                 "source_text": block.source_text,
                 "translated_text": block.translated_text,
                 "manual_insertion_reason": block.manual_insertion_reason,
-                "footnote_marker": block.footnote_marker,
+                "footnote_id": (
+                    block.footnote_id.model_dump(mode="json")
+                    if block.footnote_id is not None
+                    else None
+                ),
+                "footnote_description": (
+                    block.footnote_description.model_dump(mode="json")
+                    if block.footnote_description is not None
+                    else None
+                ),
                 "continuation": block.continuation,
                 "paragraph_continuation": block.paragraph_continuation,
                 "classification_review_required": block.classification_review_required,
@@ -149,7 +158,16 @@ def _previous_page_context(
                     "translated_text": block.translated_text,
                     "segment_handling": block.segment_handling,
                     "manual_insertion_reason": block.manual_insertion_reason,
-                    "footnote_marker": block.footnote_marker,
+                    "footnote_id": (
+                        block.footnote_id.model_dump(mode="json")
+                        if block.footnote_id is not None
+                        else None
+                    ),
+                    "footnote_description": (
+                        block.footnote_description.model_dump(mode="json")
+                        if block.footnote_description is not None
+                        else None
+                    ),
                     "continuation": block.continuation,
                     "paragraph_continuation": block.paragraph_continuation,
                 }

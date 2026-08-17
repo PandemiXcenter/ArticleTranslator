@@ -11,6 +11,8 @@ from article_translator.domain.enums import (
 from article_translator.domain.models import (
     ArtifactRef,
     DocumentTranslation,
+    FootnoteDescription,
+    FootnoteIdentity,
     MarkdownExportSettings,
     PageTranslation,
     ProviderMetadata,
@@ -32,6 +34,19 @@ def block(order: int, block_type: BlockType, text: str) -> TranslatedBlock:
         type=block_type,
         source_text=f"source {order}",
         translated_text=text,
+        footnote_id=(
+            FootnoteIdentity(id=f"fn-p1-n{order}", text=None)
+            if block_type is BlockType.FOOTNOTE
+            else None
+        ),
+        footnote_description=(
+            FootnoteDescription(
+                appearance="Small type below a rule.",
+                handling="Starts and ends on this page.",
+            )
+            if block_type is BlockType.FOOTNOTE
+            else None
+        ),
         footnote_owner_review_required=block_type is BlockType.FOOTNOTE,
     )
 
@@ -278,7 +293,7 @@ def test_compiler_keeps_table_anchor_between_surrounding_paragraphs() -> None:
     assert anchored.index("table-placement: [H!]") < anchored.index("After the table.")
 
 
-def test_compiler_labels_footnote_marker_and_continuation() -> None:
+def test_compiler_labels_footnote_reference_text_and_continuation() -> None:
     footnote = TranslatedBlock(
         block_id="p0001-b0001",
         original_page_number=1,
@@ -286,9 +301,13 @@ def test_compiler_labels_footnote_marker_and_continuation() -> None:
         type=BlockType.FOOTNOTE,
         source_text="Fortsat note.",
         translated_text="Continued note.",
-        footnote_marker="12",
+        footnote_id=FootnoteIdentity(id="fn-p1-n1", text="12"),
+        footnote_description=FootnoteDescription(
+            appearance="Numbered note in small type.",
+            handling="Starts here and continues on the next page.",
+        ),
         footnote_owner_review_required=True,
-        continuation=SegmentContinuation.FROM_PREVIOUS_AND_TO_NEXT_PAGE,
+        continuation=SegmentContinuation.TO_NEXT_PAGE,
     )
     base = document()
     page = base.pages[0].model_copy(update={"blocks": [footnote]})
@@ -299,5 +318,5 @@ def test_compiler_labels_footnote_marker_and_continuation() -> None:
             footnote_document,
             MarkdownExportSettings(include_page_comments=False),
         )
-        == "> **Footnote 12 (continued across pages):** Continued note.\n"
+        == "> **Footnote 12 (continues on next page):** Continued note.\n"
     )

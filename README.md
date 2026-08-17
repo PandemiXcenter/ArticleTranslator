@@ -63,16 +63,19 @@ identity. The table remains ordinary inline GFM rather than a floating object.
 
 Footnotes are classified by function, not by font size, position, or share of the
 page. A note may be a short marked passage below a rule, an unmarked continuation,
-or nearly a whole page. For a newly starting note, the model puts a page-local
-`[[FOOTNOTE_N]]` control token at the exact translated-text reference point and
-returns that token from the footnote block. The pipeline removes the token and
-stores the trusted owner block ID plus its Unicode character offset. LaTeX export
-then emits a real `\footnote{...}` at that point; Markdown emits a reference and
-definition. If the visible evidence does not establish an owner, the footnote is
-retained with an explicit owner-review flag and rendered separately until a
-reviewer assigns it. Footnote blocks also retain an optional printed marker and
-page-continuation state. Running heads, page numbers, digitizer marks, catchwords,
-and printer gathering signatures are not footnotes.
+or nearly a whole page. Each note has a stable identity such as `fn-p12-n2`, its
+exact printed reference evidence such as `*` or `^11`, and a structured
+description of its visible appearance and continuation handling. For a newly
+starting note, the model inserts `[[FOOTNOTE:fn-p12-n2]]` at the exact translated
+entrypoint. The pipeline removes that control token and stores the trusted owner
+block plus its Unicode offset. A next-page fragment reuses the same identity,
+links to the prior fragment, inherits its entrypoint, and is merged during export.
+LaTeX emits one real `\footnote{...}` at that point and deliberately lets LaTeX
+generate the displayed marker; the source's printed reference text is provenance,
+not compiled text. Markdown uses the semantic identity for its reference and
+definition. If the owner is not established, the note remains a visible review
+item until a reviewer assigns it. Running heads, page numbers, digitizer marks,
+catchwords, and printer gathering signatures are not footnotes.
 
 ### Previous-page continuity context
 
@@ -94,7 +97,7 @@ inline at the join. This cannot retroactively rewrite the preceding fragment.
 
 The same context can resolve a word, sentence, heading, footnote, or table
 continuation that enters the current page. The main contract is versioned as
-`translate-page-v6`; the table contract is `reconstruct-tables-v1`.
+`translate-page-v7`; the table contract is `reconstruct-tables-v1`.
 
 ## Quick start: local interface
 
@@ -143,8 +146,9 @@ loopback host or port. The interface is organized as an internal workbench:
   unresolved model-annotated occurrences exist, all at once. **Uncertain terms**
   opens a complete unresolved list ordered from most to least occurrences and
   can jump to the first marked instance. Each translated section has an editable
-  type; footnotes additionally expose an owner-section selector and exact inline
-  marker character position. An unfinished article offers **Review**;
+  type; footnotes additionally expose their stable identity, printed-reference
+  evidence, appearance/handling description, owner-section selector, and exact
+  inline marker character position. An unfinished article offers **Review**;
   a fully accepted article offers **Read**. The export menu downloads XeLaTeX
   source, Markdown, plain text, or a PDF typeset locally with XeLaTeX. **Delete**
   removes the selected immutable translation run together with its revisions and
@@ -359,14 +363,18 @@ preparations are retained until a future explicit cleanup policy exists. Forced
 preparation preserves the ordered translation-run index but clears the active run
 so the next translation receives a new identity.
 
-New core artifacts use schema version 5.0 for structured footnote ownership in
-addition to table-reconstruction handling and per-pass provenance. The filesystem
-reader validates and upgrades supported schema 2.0, 3.0, and 4.0 artifacts in
-memory without rewriting immutable files. Schema
+New core artifacts use schema version 6.0 for cross-page footnote identity,
+description, fragment linkage, and structured ownership in addition to
+table-reconstruction handling and per-pass provenance. The filesystem reader
+validates and upgrades supported schema 2.0 through 5.0 artifacts in memory
+without rewriting immutable files. Schema
 2.0 translated tables remain explicitly marked legacy translated tables; schema
 3.0 manual table placeholders remain explicitly marked legacy manual tables.
 Neither compatibility form is silently reinterpreted as a reconstructed table.
-Migrated schema 2–4 footnotes have unknown ownership and require review. A
+Legacy footnotes receive synthetic per-block IDs and an explicit migration
+description because their cross-page identity was not recorded. Incoming legacy
+continuations are retained as independent review items rather than guessed and
+merged. Migrated schema 2–4 footnotes have unknown ownership and require review. A
 translated figure is not valid schema 2.0 legacy data. Version
 1.0 artifacts predate translation-run identity and remain explicitly rejected
 rather than being attached to a guessed run.

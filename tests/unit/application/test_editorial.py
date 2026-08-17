@@ -21,6 +21,8 @@ from article_translator.domain.errors import (
 from article_translator.domain.models import (
     ArtifactRef,
     DocumentTranslation,
+    FootnoteDescription,
+    FootnoteIdentity,
     MarkdownExportSettings,
     PageTranslation,
     ProviderMetadata,
@@ -638,7 +640,11 @@ def test_reviewed_latex_places_owned_footnote_inline() -> None:
         type=BlockType.FOOTNOTE,
         source_text="Notetekst.",
         translated_text="Note & explanation.",
-        footnote_marker="*",
+        footnote_id=FootnoteIdentity(id="fn-p1-n1", text="*"),
+        footnote_description=FootnoteDescription(
+            appearance="Starred note below a rule.",
+            handling="Starts and ends on this page.",
+        ),
         footnote_owner_block_id=owner.block_id,
         footnote_anchor_offset=4,
         footnote_owner_review_required=False,
@@ -719,6 +725,11 @@ def test_owner_with_attached_footnote_cannot_be_retyped_as_footnote() -> None:
         type=BlockType.FOOTNOTE,
         source_text="Note",
         translated_text="Footnote",
+        footnote_id=FootnoteIdentity(id="fn-p1-n1", text=None),
+        footnote_description=FootnoteDescription(
+            appearance="Small type below a rule.",
+            handling="Starts and ends on this page.",
+        ),
         footnote_owner_block_id=owner.block_id,
         footnote_anchor_offset=5,
         footnote_owner_review_required=False,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from difflib import SequenceMatcher
 
+from article_translator.application.footnotes import project_footnotes
 from article_translator.domain.enums import (
     BlockType,
     ManualInsertionReason,
@@ -34,29 +35,39 @@ def compile_markdown(
     effective_text_by_id = {
         block.block_id: overrides.get(block.block_id, block.translated_text) for block in blocks
     }
-    owned_footnotes: dict[str, list[tuple[TranslatedBlock, str, int]]] = {}
+    footnote_projections = project_footnotes(
+        blocks,
+        effective_text_by_id=effective_text_by_id,
+        type_overrides=resolved_types,
+        owner_overrides=resolved_owners,
+    )
+    owned_footnotes: dict[str, list[tuple[TranslatedBlock, str, int, str]]] = {}
     owned_footnote_ids: set[str] = set()
-    for footnote in blocks:
-        if resolved_types.get(footnote.block_id, footnote.type) is not BlockType.FOOTNOTE:
-            continue
-        owner_id, anchor_offset, owner_review_required = resolved_owners.get(
-            footnote.block_id,
-            (
-                footnote.footnote_owner_block_id,
-                footnote.footnote_anchor_offset,
-                footnote.footnote_owner_review_required,
-            ),
-        )
+    merged_footnote_ids = {
+        fragment_id
+        for projection in footnote_projections
+        for fragment_id in projection.fragment_ids[1:]
+    }
+    merged_text_by_first_id = {
+        projection.first_block.block_id: projection.text for projection in footnote_projections
+    }
+    for projection in footnote_projections:
+        footnote = projection.first_block
+        owner_id = projection.owner_block_id
+        anchor_offset = projection.anchor_offset
+        owner_review_required = projection.owner_review_required
         if owner_id is None or owner_review_required:
             continue
         owner = blocks_by_id.get(owner_id)
         owner_text = effective_text_by_id.get(owner_id)
-        note_text = effective_text_by_id.get(footnote.block_id)
+        note_text = projection.text
         if owner is None or owner_text is None or note_text is None or anchor_offset is None:
             continue
         mapped_offset = _map_anchor_offset(owner.translated_text or "", owner_text, anchor_offset)
-        owned_footnotes.setdefault(owner_id, []).append((footnote, note_text, mapped_offset))
-        owned_footnote_ids.add(footnote.block_id)
+        owned_footnotes.setdefault(owner_id, []).append(
+            (footnote, note_text, mapped_offset, projection.identity)
+        )
+        owned_footnote_ids.update(projection.fragment_ids)
     parts: list[str] = []
     part_by_block_id: dict[str, int] = {}
     for page in document.pages:
@@ -75,6 +86,10 @@ def compile_markdown(
             effective_text = overrides.get(block.block_id, block.translated_text)
             if block.block_id in owned_footnote_ids:
                 continue
+            if block.block_id in merged_footnote_ids:
+                continue
+            if block.block_id in merged_text_by_first_id:
+                effective_text = merged_text_by_first_id[block.block_id]
             if effective_text is not None and block.block_id in owned_footnotes:
                 effective_text = _insert_markdown_footnote_references(
                     effective_text,
@@ -128,9 +143,9 @@ def compile_markdown(
             parts.append(page_marker)
 
     definitions = [
-        _markdown_footnote_definition(footnote, note_text)
+        _markdown_footnote_definition(footnote, note_text, identity)
         for footnotes in owned_footnotes.values()
-        for footnote, note_text, _ in footnotes
+        for footnote, note_text, _, identity in footnotes
     ]
     rendered_document = "\n\n".join([*parts, *definitions]).rstrip()
     return f"{rendered_document}\n" if rendered_document else ""
@@ -224,24 +239,27 @@ def _render_block(
 
 def _insert_markdown_footnote_references(
     value: str,
-    footnotes: list[tuple[TranslatedBlock, str, int]],
+    footnotes: list[tuple[TranslatedBlock, str, int, str]],
 ) -> str:
     result = value
-    for footnote, _, offset in sorted(
+    for _footnote, _, offset, identity in sorted(
         footnotes,
         key=lambda item: (item[2], item[0].order),
         reverse=True,
     ):
         bounded = min(max(offset, 0), len(result))
-        result = f"{result[:bounded]}[^{footnote.block_id}]{result[bounded:]}"
+        result = f"{result[:bounded]}[^{identity}]{result[bounded:]}"
     return result
 
 
-def _markdown_footnote_definition(footnote: TranslatedBlock, value: str) -> str:
+def _markdown_footnote_definition(
+    footnote: TranslatedBlock,
+    value: str,
+    identity: str | None = None,
+) -> str:
     lines = value.strip().splitlines()
-    return "\n".join(
-        [f"[^{footnote.block_id}]: {lines[0]}", *(f"    {line}" for line in lines[1:])]
-    )
+    reference = identity or (footnote.footnote_id.id if footnote.footnote_id else footnote.block_id)
+    return "\n".join([f"[^{reference}]: {lines[0]}", *(f"    {line}" for line in lines[1:])])
 
 
 def _map_anchor_offset(machine_text: str, effective_text: str, offset: int) -> int:
@@ -280,8 +298,8 @@ def _single_line(text: str) -> str:
 
 def _footnote_label(block: TranslatedBlock) -> str:
     label = "Footnote"
-    if block.footnote_marker is not None:
-        label = f"{label} {_escape_markdown_label(block.footnote_marker)}"
+    if block.footnote_id is not None and block.footnote_id.text is not None:
+        label = f"{label} {_escape_markdown_label(block.footnote_id.text)}"
     continuation = None
     if block.continuation is not None:
         continuation = {

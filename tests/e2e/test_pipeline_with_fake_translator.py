@@ -19,6 +19,8 @@ from article_translator.domain.errors import (
 )
 from article_translator.domain.models import (
     ArtifactRef,
+    FootnoteDescription,
+    FootnoteIdentity,
     GeneratedBlock,
     GeneratedFootnoteBlock,
     GeneratedManualInsertionBlock,
@@ -158,7 +160,7 @@ class FootnoteOwnerTranslator(FakeTranslator):
                         order=1,
                         type=BlockType.BODY,
                         source_text="Text* continues.",
-                        translated_text="Text[[FOOTNOTE_1]] continues.",
+                        translated_text="Text[[FOOTNOTE:fn-p1-n1]] continues.",
                         paragraph_continuation=SegmentContinuation.COMPLETE,
                     ),
                     GeneratedFootnoteBlock(
@@ -166,14 +168,69 @@ class FootnoteOwnerTranslator(FakeTranslator):
                         type=BlockType.FOOTNOTE,
                         source_text="Note text.",
                         translated_text="Translated note.",
-                        footnote_marker="*",
-                        owner_reference_token="[[FOOTNOTE_1]]",
+                        footnote_id=FootnoteIdentity(id="fn-p1-n1", text="*"),
+                        entrypoint_token="[[FOOTNOTE:fn-p1-n1]]",
+                        description=FootnoteDescription(
+                            appearance="Starred note below a separator rule.",
+                            handling="Starts and ends on this page.",
+                        ),
                         owner_review_required=False,
                         continuation=SegmentContinuation.COMPLETE,
                     ),
                 ]
             )
         )
+
+
+class CrossPageFootnoteTranslator(FakeTranslator):
+    def translate_page(self, request: PageTranslationRequest) -> ProviderResult:
+        self.calls.append(request.original_page_number)
+        self.prompts[request.original_page_number] = request.prompt
+        identity = FootnoteIdentity(id="fn-p1-n1", text="^11")
+        description = FootnoteDescription(
+            appearance="Superscript 11 with small note text below a separator rule.",
+            handling=(
+                "Starts on page 1 and continues onto page 2."
+                if request.original_page_number == 1
+                else "Reuses fn-p1-n1 from the previous page and ends here."
+            ),
+        )
+        if request.original_page_number == 1:
+            blocks = [
+                GeneratedBlock(
+                    order=1,
+                    type=BlockType.BODY,
+                    source_text="Text^11 continues.",
+                    translated_text="Text[[FOOTNOTE:fn-p1-n1]] continues.",
+                    paragraph_continuation=SegmentContinuation.COMPLETE,
+                ),
+                GeneratedFootnoteBlock(
+                    order=2,
+                    type=BlockType.FOOTNOTE,
+                    source_text="First note fragment",
+                    translated_text="First note fragment",
+                    footnote_id=identity,
+                    entrypoint_token="[[FOOTNOTE:fn-p1-n1]]",
+                    description=description,
+                    owner_review_required=False,
+                    continuation=SegmentContinuation.TO_NEXT_PAGE,
+                ),
+            ]
+        else:
+            blocks = [
+                GeneratedFootnoteBlock(
+                    order=1,
+                    type=BlockType.FOOTNOTE,
+                    source_text="second note fragment.",
+                    translated_text="second note fragment.",
+                    footnote_id=identity,
+                    entrypoint_token=None,
+                    description=description,
+                    owner_review_required=False,
+                    continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
+                )
+            ]
+        return ProviderResult(payload=GeneratedPagePayload(blocks=blocks))
 
 
 class FailingExtractor:
@@ -261,10 +318,14 @@ class SegmentingTranslator:
                         type=BlockType.FOOTNOTE,
                         source_text="Fortsat note",
                         translated_text="Continued note",
-                        footnote_marker=None,
-                        owner_reference_token=None,
+                        footnote_id=FootnoteIdentity(id="fn-p2-n1", text=None),
+                        entrypoint_token=None,
+                        description=FootnoteDescription(
+                            appearance="Small unmarked note at the foot of the page.",
+                            handling="Owner is not visible and requires review.",
+                        ),
                         owner_review_required=True,
-                        continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
+                        continuation=SegmentContinuation.COMPLETE,
                     )
                 ]
             )
@@ -459,13 +520,45 @@ def test_pipeline_converts_provider_footnote_token_to_trusted_inline_anchor(
     owner, footnote = document.pages[0].blocks
 
     assert owner.translated_text == "Text continues."
-    assert "[[FOOTNOTE_" not in owner.translated_text
+    assert "[[FOOTNOTE:" not in owner.translated_text
     assert footnote.footnote_owner_block_id == owner.block_id
     assert footnote.footnote_anchor_offset == 4
     assert footnote.footnote_owner_review_required is False
 
     latex_path = pipeline.compile_document(job_dir, settings=MarkdownExportSettings())
     assert "Text\\footnote{Translated note.} continues." in latex_path.read_text(encoding="utf-8")
+
+
+def test_pipeline_links_and_compiles_cross_page_footnote_as_one_latex_note(
+    tmp_path: Path,
+) -> None:
+    pipeline, job_dir = _prepared_job(tmp_path)
+    translator = CrossPageFootnoteTranslator()
+
+    document = pipeline.translate_document(
+        job_dir,
+        settings=TranslationSettings(previous_page_context_count=1),
+        translator=translator,
+    )
+    first_note = document.pages[0].blocks[1]
+    second_note = document.pages[1].blocks[0]
+
+    assert second_note.footnote_id == first_note.footnote_id
+    assert second_note.footnote_continues_from_block_id == first_note.block_id
+    assert second_note.footnote_owner_block_id == first_note.footnote_owner_block_id
+    assert second_note.footnote_anchor_offset == first_note.footnote_anchor_offset
+    assert '"id": "fn-p1-n1"' in translator.prompts[2]
+
+    latex_path = pipeline.compile_document(job_dir, settings=MarkdownExportSettings())
+    latex = latex_path.read_text(encoding="utf-8")
+    markdown = latex_path.with_suffix(".md").read_text(encoding="utf-8")
+    assert latex.count("\\footnote{") == 1
+    assert "First note fragment" in latex
+    assert "second note fragment." in latex
+    assert "^11" not in latex
+    assert markdown.count("[^fn-p1-n1]") == 2
+    assert "First note fragment" in markdown
+    assert "second note fragment." in markdown
 
 
 def test_pipeline_maps_provider_variants_to_trusted_compatible_blocks(tmp_path: Path) -> None:
@@ -497,8 +590,9 @@ def test_pipeline_maps_provider_variants_to_trusted_compatible_blocks(tmp_path: 
         second_table.block_id,
     ]
     assert footnote.segment_handling is SegmentHandling.TRANSLATE
-    assert footnote.footnote_marker is None
-    assert footnote.continuation is SegmentContinuation.FROM_PREVIOUS_PAGE
+    assert footnote.footnote_id is not None
+    assert footnote.footnote_id.text is None
+    assert footnote.continuation is SegmentContinuation.COMPLETE
 
 
 def test_completed_table_checkpoint_revalidates_second_pass_fingerprint(tmp_path: Path) -> None:

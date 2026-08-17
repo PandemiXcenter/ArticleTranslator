@@ -18,6 +18,8 @@ from article_translator.domain.errors import ArtifactError
 from article_translator.domain.models import (
     ArtifactRef,
     DocumentTranslation,
+    FootnoteDescription,
+    FootnoteIdentity,
     PageTranslation,
     ProviderMetadata,
     TranslatedBlock,
@@ -131,7 +133,6 @@ def test_filesystem_reads_v2_document_without_rewriting_immutable_artifact(
     for field in (
         "segment_handling",
         "manual_insertion_reason",
-        "footnote_marker",
         "continuation",
         "classification_review_required",
         "legacy_translated_table",
@@ -144,8 +145,8 @@ def test_filesystem_reads_v2_document_without_rewriting_immutable_artifact(
 
     restored = repository.read_document(RUN_ID)
 
-    assert restored.schema_version == "5.0"
-    assert restored.pages[0].schema_version == "5.0"
+    assert restored.schema_version == "6.0"
+    assert restored.pages[0].schema_version == "6.0"
     assert restored.pages[0].blocks[0].legacy_translated_table is True
     assert restored.pages[0].blocks[0].type is BlockType.TABLE
     assert json.loads(document_path.read_text(encoding="utf-8"))["schema_version"] == "2.0"
@@ -212,7 +213,7 @@ def test_filesystem_reads_v3_manual_table_as_legacy_without_reconstruction_or_re
 
     restored = repository.read_document(RUN_ID)
 
-    assert restored.schema_version == "5.0"
+    assert restored.schema_version == "6.0"
     assert restored.pages[0].blocks[0].legacy_manual_table is True
     assert restored.pages[0].blocks[0].segment_handling is SegmentHandling.MANUAL_INSERTION
     assert document_path.read_bytes() == original_bytes
@@ -233,6 +234,11 @@ def test_filesystem_reads_v4_footnote_with_unknown_owner_without_rewrite(tmp_pat
         type=BlockType.FOOTNOTE,
         source_text="Note",
         translated_text="Footnote",
+        footnote_id=FootnoteIdentity(id="fn-p1-n1", text=None),
+        footnote_description=FootnoteDescription(
+            appearance="Small type below a rule.",
+            handling="Starts and ends on this page.",
+        ),
         footnote_owner_review_required=True,
         continuation=SegmentContinuation.COMPLETE,
     )
@@ -270,6 +276,9 @@ def test_filesystem_reads_v4_footnote_with_unknown_owner_without_rewrite(tmp_pat
         "footnote_owner_block_id",
         "footnote_anchor_offset",
         "footnote_owner_review_required",
+        "footnote_id",
+        "footnote_description",
+        "footnote_continues_from_block_id",
     ):
         payload["pages"][0]["blocks"][0].pop(field)
     document_path = tmp_path / "job" / "runs" / RUN_ID / "output" / "document.json"
@@ -280,7 +289,11 @@ def test_filesystem_reads_v4_footnote_with_unknown_owner_without_rewrite(tmp_pat
     restored = repository.read_document(RUN_ID)
 
     restored_footnote = restored.pages[0].blocks[0]
-    assert restored.schema_version == "5.0"
+    assert restored.schema_version == "6.0"
+    assert restored.pages[0].blocks[0].footnote_id == FootnoteIdentity(
+        id="fn-p1-n1",
+        text=None,
+    )
     assert restored_footnote.footnote_owner_block_id is None
     assert restored_footnote.footnote_anchor_offset is None
     assert restored_footnote.footnote_owner_review_required is True

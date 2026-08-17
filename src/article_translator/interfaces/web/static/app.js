@@ -1319,15 +1319,35 @@ function makeTranslationBlock(block, page, draftText) {
   if (block.footnote_owner_review_required === true) {
     meta.append(createElement("span", "classification-warning", "Choose footnote owner"));
   }
+  if (block.footnote_id?.id) {
+    const printedReference = block.footnote_id.text
+      ? ` · printed reference ${block.footnote_id.text}`
+      : " · no visible printed reference";
+    meta.append(
+      createElement("span", "footnote-identity", `Footnote ${block.footnote_id.id}${printedReference}`),
+    );
+  }
+  if (block.footnote_continues_from_block_id) {
+    meta.append(
+      createElement(
+        "span",
+        "footnote-continuation",
+        `Continues ${block.footnote_continues_from_block_id}`,
+      ),
+    );
+  }
   const ownedFootnotes = state.reviewPages
     .flatMap((candidatePage) => candidatePage.blocks || [])
     .filter((candidate) => candidate.footnote_owner_block_id === block.block_id);
   if (ownedFootnotes.length) {
+    const ownedFootnoteCount = new Set(
+      ownedFootnotes.map((candidate) => candidate.footnote_id?.id || candidate.block_id),
+    ).size;
     meta.append(
       createElement(
         "span",
         "footnote-owner-badge",
-        `Owns ${ownedFootnotes.length} ${ownedFootnotes.length === 1 ? "footnote" : "footnotes"}`,
+        `Owns ${ownedFootnoteCount} ${ownedFootnoteCount === 1 ? "footnote" : "footnotes"}`,
       ),
     );
   }
@@ -1417,6 +1437,16 @@ function makeTranslationBlock(block, page, draftText) {
   );
   sectionControls.querySelector(".footnote-anchor-help").hidden =
     asText(block.type) !== "footnote";
+
+  if (block.footnote_description) {
+    const description = createElement("details", "footnote-description");
+    description.append(createElement("summary", "", "Footnote description"));
+    description.append(
+      createElement("p", "", `Appearance: ${asText(block.footnote_description.appearance)}`),
+      createElement("p", "", `Handling: ${asText(block.footnote_description.handling)}`),
+    );
+    sectionControls.append(description);
+  }
 
   const editor = createElement("div", "translated-editor");
   editor.dataset.testid = "translated-block";

@@ -686,12 +686,24 @@ def _review_payload(review: ReviewDocument) -> dict[str, object]:
                             if block.manual_insertion_reason is not None
                             else None
                         ),
-                        "footnote_marker": block.footnote_marker,
+                        "footnote_id": (
+                            block.footnote_id.model_dump(mode="json")
+                            if block.footnote_id is not None
+                            else None
+                        ),
+                        "footnote_description": (
+                            block.footnote_description.model_dump(mode="json")
+                            if block.footnote_description is not None
+                            else None
+                        ),
                         "footnote_owner_block_id": block.footnote_owner_block_id,
                         "footnote_anchor_offset": block.footnote_anchor_offset,
                         "footnote_owner_review_required": (block.footnote_owner_review_required),
                         "continuation": (
                             block.continuation.value if block.continuation is not None else None
+                        ),
+                        "footnote_continues_from_block_id": (
+                            block.footnote_continues_from_block_id
                         ),
                         "paragraph_continuation": (
                             block.paragraph_continuation.value

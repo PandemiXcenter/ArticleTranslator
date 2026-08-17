@@ -23,14 +23,18 @@ from article_translator.domain.enums import (
     TranslationStyle,
 )
 
-SCHEMA_VERSION: Literal["5.0"] = "5.0"
+SCHEMA_VERSION: Literal["6.0"] = "6.0"
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 TranslationRunId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
 BlockId = Annotated[str, StringConstraints(pattern=r"^p\d{4,}-b\d{4,}$")]
-FootnoteReferenceToken = Annotated[
+FootnoteIdentifier = Annotated[
     str,
-    StringConstraints(pattern=r"^\[\[FOOTNOTE_[1-9]\d*\]\]$"),
+    StringConstraints(pattern=r"^fn-p[1-9]\d*-n[1-9]\d*$"),
+]
+FootnoteEntrypointToken = Annotated[
+    str,
+    StringConstraints(pattern=r"^\[\[FOOTNOTE:fn-p[1-9]\d*-n[1-9]\d*\]\]$"),
 ]
 ProviderSetting = str | int | float | bool
 
@@ -126,6 +130,32 @@ class UncertainTerm(ContractModel):
     alternatives: list[str] = Field(default_factory=list)
 
 
+class FootnoteIdentity(ContractModel):
+    """Cross-page note identity plus the source's printed reference text."""
+
+    id: FootnoteIdentifier
+    text: str | None = Field(default=None, max_length=64)
+
+    @field_validator("text")
+    @classmethod
+    def normalize_reference_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if any(character in stripped for character in "\r\n\0"):
+            raise ValueError("footnote reference text must be a single line")
+        return stripped
+
+
+class FootnoteDescription(ContractModel):
+    """Observable appearance and the model's page-continuation handling."""
+
+    appearance: NonEmptyText
+    handling: NonEmptyText
+
+
 OrdinaryBlockType: TypeAlias = Literal[  # noqa: UP040
     BlockType.TITLE,
     BlockType.SUBTITLE,
@@ -171,20 +201,23 @@ class GeneratedFootnoteBlock(ContractModel):
     type: Literal[BlockType.FOOTNOTE]
     source_text: NonEmptyText
     translated_text: NonEmptyText
-    footnote_marker: str | None
-    owner_reference_token: FootnoteReferenceToken | None
+    footnote_id: FootnoteIdentity
+    entrypoint_token: FootnoteEntrypointToken | None
+    description: FootnoteDescription
     owner_review_required: bool
     continuation: SegmentContinuation
     uncertainties: list[UncertainTerm] = Field(default_factory=list)
     classification_review_required: bool = False
 
-    @field_validator("footnote_marker")
-    @classmethod
-    def normalize_footnote_marker(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        stripped = value.strip()
-        return stripped or None
+    @model_validator(mode="after")
+    def entrypoint_must_match_identity(self) -> Self:
+        if self.entrypoint_token is not None and self.entrypoint_token != (
+            f"[[FOOTNOTE:{self.footnote_id.id}]]"
+        ):
+            raise ValueError("footnote entrypoint token must contain its footnote ID")
+        if _continues_from_previous(self.continuation) and self.entrypoint_token is not None:
+            raise ValueError("a continued footnote must reuse its earlier entrypoint")
+        return self
 
 
 class GeneratedManualInsertionBlock(ContractModel):
@@ -261,10 +294,11 @@ class GeneratedPagePayload(ContractModel):
                 "an unfinished paragraph must be the final main-flow block on its page"
             )
         footnotes = [block for block in self.blocks if isinstance(block, GeneratedFootnoteBlock)]
+        footnote_ids = [block.footnote_id.id for block in footnotes]
+        if len(footnote_ids) != len(set(footnote_ids)):
+            raise ValueError("a footnote ID may occur only once on one physical page")
         declared_tokens = [
-            block.owner_reference_token
-            for block in footnotes
-            if block.owner_reference_token is not None
+            block.entrypoint_token for block in footnotes if block.entrypoint_token is not None
         ]
         if len(declared_tokens) != len(set(declared_tokens)):
             raise ValueError("footnote owner reference tokens must be unique")
@@ -277,9 +311,12 @@ class GeneratedPagePayload(ContractModel):
             if isinstance(block, (GeneratedTextBlock, GeneratedFootnoteBlock))
         ]
         for footnote in footnotes:
-            token = footnote.owner_reference_token
+            token = footnote.entrypoint_token
             if token is None:
-                if not footnote.owner_review_required:
+                if (
+                    not _continues_from_previous(footnote.continuation)
+                    and not footnote.owner_review_required
+                ):
                     raise ValueError("an unowned footnote must require owner review")
                 continue
             if footnote.owner_review_required:
@@ -292,7 +329,7 @@ class GeneratedPagePayload(ContractModel):
         embedded_tokens = {
             token
             for text in all_translated_text
-            for token in re.findall(r"\[\[FOOTNOTE_[1-9]\d*\]\]", text)
+            for token in re.findall(r"\[\[FOOTNOTE:fn-p[1-9]\d*-n[1-9]\d*\]\]", text)
         }
         if embedded_tokens != set(declared_tokens):
             raise ValueError("translated text contains an undeclared footnote reference token")
@@ -394,24 +431,18 @@ class TranslatedBlock(ContractModel):
     uncertainties: list[UncertainTerm] = Field(default_factory=list)
     segment_handling: SegmentHandling = SegmentHandling.TRANSLATE
     manual_insertion_reason: ManualInsertionReason | None = None
-    footnote_marker: str | None = None
+    footnote_id: FootnoteIdentity | None = None
+    footnote_description: FootnoteDescription | None = None
     footnote_owner_block_id: BlockId | None = None
     footnote_anchor_offset: int | None = Field(default=None, ge=0)
     footnote_owner_review_required: bool = False
     continuation: SegmentContinuation | None = None
+    footnote_continues_from_block_id: BlockId | None = None
     paragraph_continuation: SegmentContinuation | None = None
     continues_from_block_id: BlockId | None = None
     classification_review_required: bool = False
     legacy_translated_table: bool = False
     legacy_manual_table: bool = False
-
-    @field_validator("footnote_marker")
-    @classmethod
-    def normalize_footnote_marker(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        stripped = value.strip()
-        return stripped or None
 
     @model_validator(mode="after")
     def segment_contract_must_be_consistent(self) -> Self:
@@ -437,10 +468,12 @@ def _validate_segment_contract(block: TranslatedBlock) -> None:
         if block.uncertainties:
             raise ValueError("manual insertion blocks cannot contain text uncertainties")
         if (
-            block.footnote_marker is not None
+            block.footnote_id is not None
+            or block.footnote_description is not None
             or block.footnote_owner_block_id is not None
             or block.footnote_anchor_offset is not None
             or block.footnote_owner_review_required
+            or block.footnote_continues_from_block_id is not None
         ):
             raise ValueError("manual insertion blocks cannot contain footnote metadata")
         if block.continuation is None:
@@ -463,10 +496,12 @@ def _validate_segment_contract(block: TranslatedBlock) -> None:
             raise ValueError("reconstructed tables must retain continuation metadata")
         if (
             block.heading_level is not None
-            or block.footnote_marker is not None
+            or block.footnote_id is not None
+            or block.footnote_description is not None
             or block.footnote_owner_block_id is not None
             or block.footnote_anchor_offset is not None
             or block.footnote_owner_review_required
+            or block.footnote_continues_from_block_id is not None
         ):
             raise ValueError("reconstructed tables cannot contain heading or footnote metadata")
         if block.legacy_translated_table or block.legacy_manual_table:
@@ -488,15 +523,19 @@ def _validate_segment_contract(block: TranslatedBlock) -> None:
     if block.legacy_manual_table:
         raise ValueError("translated blocks cannot be legacy manual tables")
     footnote_metadata_present = (
-        block.footnote_marker is not None
+        block.footnote_id is not None
+        or block.footnote_description is not None
         or block.continuation is not None
         or block.footnote_owner_block_id is not None
         or block.footnote_anchor_offset is not None
         or block.footnote_owner_review_required
+        or block.footnote_continues_from_block_id is not None
     )
     if block.type is not BlockType.FOOTNOTE and footnote_metadata_present:
         raise ValueError("footnote metadata is valid only for footnote blocks")
     if block.type is BlockType.FOOTNOTE:
+        if block.footnote_id is None or block.footnote_description is None:
+            raise ValueError("footnotes must retain identity and description metadata")
         has_owner = block.footnote_owner_block_id is not None
         if has_owner != (block.footnote_anchor_offset is not None):
             raise ValueError("a footnote owner block and anchor offset must be stored together")
@@ -504,6 +543,9 @@ def _validate_segment_contract(block: TranslatedBlock) -> None:
             raise ValueError("a resolved footnote owner cannot require owner review")
         if not has_owner and not block.footnote_owner_review_required:
             raise ValueError("an unowned footnote must require owner review")
+        incoming = _continues_from_previous(block.continuation)
+        if incoming != (block.footnote_continues_from_block_id is not None):
+            raise ValueError("incoming footnotes must link their previous-page fragment")
     if block.type is BlockType.BODY:
         if _continues_from_previous(block.paragraph_continuation):
             if block.continues_from_block_id is None:
@@ -541,7 +583,7 @@ def _validate_manual_reason(
 class PageTranslation(ContractModel):
     """One independently retriable and cacheable page result."""
 
-    schema_version: Literal["5.0"] = SCHEMA_VERSION
+    schema_version: Literal["6.0"] = SCHEMA_VERSION
     translation_run_id: TranslationRunId
     original_page_number: int = Field(ge=1)
     pdf_page_label: str | None = None
@@ -599,9 +641,17 @@ class PageTranslation(ContractModel):
             )
         blocks_by_id = {block.block_id: block for block in self.blocks}
         for footnote in (block for block in self.blocks if block.type is BlockType.FOOTNOTE):
+            if footnote.footnote_continues_from_block_id is not None:
+                previous_page_number = int(
+                    footnote.footnote_continues_from_block_id.split("-", 1)[0][1:]
+                )
+                if previous_page_number != self.original_page_number - 1:
+                    raise ValueError("footnote continuation must link the previous physical page")
             if footnote.footnote_owner_block_id is None:
                 continue
             owner = blocks_by_id.get(footnote.footnote_owner_block_id)
+            if owner is None and footnote.footnote_continues_from_block_id is not None:
+                continue
             if owner is None or owner.type is BlockType.FOOTNOTE:
                 raise ValueError("a footnote owner must be a non-footnote block on the same page")
             if (
@@ -628,7 +678,7 @@ class PageTranslation(ContractModel):
 class JobManifest(ContractModel):
     """Mutable run index; page artifacts remain the recovery source of truth."""
 
-    schema_version: Literal["5.0"] = SCHEMA_VERSION
+    schema_version: Literal["6.0"] = SCHEMA_VERSION
     job_id: NonEmptyText
     preparation_id: NonEmptyText
     document_id: Sha256
@@ -670,7 +720,7 @@ class JobManifest(ContractModel):
 
 
 class PageFailure(ContractModel):
-    schema_version: Literal["5.0"] = SCHEMA_VERSION
+    schema_version: Literal["6.0"] = SCHEMA_VERSION
     original_page_number: int = Field(ge=1)
     input_fingerprint: Sha256 | None = None
     stage: Literal["page_translation", "table_reconstruction"] = "page_translation"
@@ -682,7 +732,7 @@ class PageFailure(ContractModel):
 class DocumentTranslation(ContractModel):
     """Canonical dataset consumed by the future editor and all exporters."""
 
-    schema_version: Literal["5.0"] = SCHEMA_VERSION
+    schema_version: Literal["6.0"] = SCHEMA_VERSION
     translation_run_id: TranslationRunId
     document_id: Sha256
     job_id: NonEmptyText
@@ -735,4 +785,32 @@ class DocumentTranslation(ContractModel):
                     raise ValueError(
                         "paragraph continuation must link the previous page's final body block"
                     )
+        for block in blocks_by_id.values():
+            previous_footnote_id = block.footnote_continues_from_block_id
+            if previous_footnote_id is None:
+                continue
+            previous = blocks_by_id.get(previous_footnote_id)
+            if previous is None:
+                raise ValueError("footnote continuation links an unknown block")
+            if (
+                block.type is not BlockType.FOOTNOTE
+                or previous.type is not BlockType.FOOTNOTE
+                or previous.original_page_number != block.original_page_number - 1
+                or previous.footnote_id != block.footnote_id
+                or previous.continuation
+                not in {
+                    SegmentContinuation.TO_NEXT_PAGE,
+                    SegmentContinuation.FROM_PREVIOUS_AND_TO_NEXT_PAGE,
+                    SegmentContinuation.UNKNOWN,
+                }
+            ):
+                raise ValueError(
+                    "footnote continuation must reuse the same ID from the previous page"
+                )
+            if (
+                block.footnote_owner_block_id != previous.footnote_owner_block_id
+                or block.footnote_anchor_offset != previous.footnote_anchor_offset
+                or block.footnote_owner_review_required != previous.footnote_owner_review_required
+            ):
+                raise ValueError("continued footnotes must retain their original entrypoint")
         return self

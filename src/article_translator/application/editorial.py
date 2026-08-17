@@ -314,7 +314,7 @@ class EditorialService:
                         block.footnote_owner_review_required,
                     )
                     for block in _iter_review_blocks(review)
-                    if block.type is BlockType.FOOTNOTE
+                    if block.type is BlockType.FOOTNOTE and block.latest_revision_number > 0
                 },
             )
 
@@ -361,7 +361,7 @@ class EditorialService:
                         block.footnote_owner_review_required,
                     )
                     for block in _iter_review_blocks(review)
-                    if block.type is BlockType.FOOTNOTE
+                    if block.type is BlockType.FOOTNOTE and block.latest_revision_number > 0
                 },
             )
 
@@ -499,7 +499,10 @@ class EditorialService:
                         machine_translated_text=block.translated_text,
                         effective_translated_text=effective_text,
                         manual_insertion_reason=block.manual_insertion_reason,
-                        footnote_marker=(block.footnote_marker if effective_is_footnote else None),
+                        footnote_id=(block.footnote_id if effective_is_footnote else None),
+                        footnote_description=(
+                            block.footnote_description if effective_is_footnote else None
+                        ),
                         footnote_owner_block_id=owner_block_id,
                         footnote_anchor_offset=owner_offset,
                         footnote_owner_review_required=owner_review_required,
@@ -507,6 +510,11 @@ class EditorialService:
                             block.continuation
                             if effective_is_footnote
                             or block.segment_handling is not SegmentHandling.TRANSLATE
+                            else None
+                        ),
+                        footnote_continues_from_block_id=(
+                            block.footnote_continues_from_block_id
+                            if effective_is_footnote
                             else None
                         ),
                         paragraph_continuation=(

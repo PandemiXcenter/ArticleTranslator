@@ -15,6 +15,8 @@ from article_translator.domain.enums import (
 from article_translator.domain.models import (
     BlockId,
     ContractModel,
+    FootnoteDescription,
+    FootnoteIdentity,
     NonEmptyText,
     Sha256,
     TranslationRunId,
@@ -137,11 +139,13 @@ class ReviewBlock(ContractModel):
     machine_translated_text: NonEmptyText | None
     effective_translated_text: str
     manual_insertion_reason: ManualInsertionReason | None = None
-    footnote_marker: str | None = None
+    footnote_id: FootnoteIdentity | None = None
+    footnote_description: FootnoteDescription | None = None
     footnote_owner_block_id: BlockId | None = None
     footnote_anchor_offset: int | None = Field(default=None, ge=0)
     footnote_owner_review_required: bool = False
     continuation: SegmentContinuation | None = None
+    footnote_continues_from_block_id: BlockId | None = None
     paragraph_continuation: SegmentContinuation | None = None
     continues_from_block_id: BlockId | None = None
     classification_review_required: bool = False
@@ -191,11 +195,13 @@ class ReviewBlock(ContractModel):
             self.segment_handling is SegmentHandling.TRANSLATE
             and self.type is not BlockType.FOOTNOTE
             and (
-                self.footnote_marker is not None
+                self.footnote_id is not None
+                or self.footnote_description is not None
                 or self.continuation is not None
                 or self.footnote_owner_block_id is not None
                 or self.footnote_anchor_offset is not None
                 or self.footnote_owner_review_required
+                or self.footnote_continues_from_block_id is not None
             )
         ):
             raise ValueError("footnote metadata is valid only for footnote review blocks")

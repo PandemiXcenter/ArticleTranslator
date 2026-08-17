@@ -14,6 +14,8 @@ from article_translator.domain.enums import (
 from article_translator.domain.models import (
     ArtifactRef,
     DocumentTranslation,
+    FootnoteDescription,
+    FootnoteIdentity,
     GeneratedBlock,
     GeneratedFootnoteBlock,
     GeneratedManualInsertionBlock,
@@ -270,9 +272,13 @@ def test_persisted_page_rejects_paragraph_continuation_away_from_flow_edge() -> 
         type=BlockType.FOOTNOTE,
         source_text="Fortsat note",
         translated_text="Continued note",
-        footnote_marker=None,
+        footnote_id=FootnoteIdentity(id="fn-p2-n1", text=None),
+        footnote_description=FootnoteDescription(
+            appearance="Small type below a rule.",
+            handling="Starts and ends on this page.",
+        ),
         footnote_owner_review_required=True,
-        continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
+        continuation=SegmentContinuation.COMPLETE,
     )
     with pytest.raises(ValidationError, match="first main-flow block"):
         translated_page(
@@ -341,7 +347,10 @@ def test_generated_footnote_requires_explicit_continuation_metadata() -> None:
                 "type": "footnote",
                 "source_text": "fortsat note",
                 "translated_text": "continued note",
-                "footnote_marker": None,
+                "footnote_id": {"id": "fn-p1-n1", "text": None},
+                "entrypoint_token": None,
+                "description": {"appearance": "Small type", "handling": "Unclear"},
+                "owner_review_required": True,
             }
         )
 
@@ -350,13 +359,17 @@ def test_generated_footnote_requires_explicit_continuation_metadata() -> None:
         type=BlockType.FOOTNOTE,
         source_text="fortsat note",
         translated_text="continued note",
-        footnote_marker=None,
-        owner_reference_token=None,
+        footnote_id=FootnoteIdentity(id="fn-p1-n1", text=None),
+        entrypoint_token=None,
+        description=FootnoteDescription(
+            appearance="Small type at the top of the page.",
+            handling="Continues the same note from the preceding page.",
+        ),
         owner_review_required=True,
         continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
     )
 
-    assert block.footnote_marker is None
+    assert block.footnote_id.text is None
     assert block.continuation is SegmentContinuation.FROM_PREVIOUS_PAGE
 
 
@@ -367,7 +380,7 @@ def test_generated_footnote_owner_token_must_resolve_exactly_once() -> None:
                 order=1,
                 type=BlockType.BODY,
                 source_text="Tekst* fortsætter.",
-                translated_text="Text[[FOOTNOTE_1]] continues.",
+                translated_text="Text[[FOOTNOTE:fn-p1-n1]] continues.",
                 paragraph_continuation=SegmentContinuation.COMPLETE,
             ),
             GeneratedFootnoteBlock(
@@ -375,8 +388,12 @@ def test_generated_footnote_owner_token_must_resolve_exactly_once() -> None:
                 type=BlockType.FOOTNOTE,
                 source_text="Notetekst.",
                 translated_text="Note text.",
-                footnote_marker="*",
-                owner_reference_token="[[FOOTNOTE_1]]",
+                footnote_id=FootnoteIdentity(id="fn-p1-n1", text="*"),
+                entrypoint_token="[[FOOTNOTE:fn-p1-n1]]",
+                description=FootnoteDescription(
+                    appearance="Starred note below a rule.",
+                    handling="Starts and ends on this page.",
+                ),
                 owner_review_required=False,
                 continuation=SegmentContinuation.COMPLETE,
             ),
@@ -385,7 +402,7 @@ def test_generated_footnote_owner_token_must_resolve_exactly_once() -> None:
 
     generated_footnote = payload.blocks[1]
     assert isinstance(generated_footnote, GeneratedFootnoteBlock)
-    assert generated_footnote.owner_reference_token == "[[FOOTNOTE_1]]"
+    assert generated_footnote.entrypoint_token == "[[FOOTNOTE:fn-p1-n1]]"
     with pytest.raises(ValidationError, match="exactly once"):
         GeneratedPagePayload(
             blocks=[
@@ -403,7 +420,7 @@ def test_generated_footnote_owner_token_must_resolve_exactly_once() -> None:
                 ),
                 payload.blocks[1].model_copy(
                     update={
-                        "owner_reference_token": None,
+                        "entrypoint_token": None,
                         "owner_review_required": False,
                     }
                 ),
@@ -453,13 +470,19 @@ def test_explicit_v2_legacy_table_marker_preserves_translated_table() -> None:
             "type": "footnote",
             "source_text": "Ældre note",
             "translated_text": "Older note",
+            "footnote_id": {"id": "fn-p1-n2", "text": None},
+            "footnote_description": {
+                "appearance": "Not recorded by the legacy schema.",
+                "handling": "Independent migrated note.",
+            },
             "footnote_owner_review_required": True,
         }
     )
 
     assert legacy_table.segment_handling is SegmentHandling.TRANSLATE
     assert legacy_table.manual_insertion_reason is None
-    assert legacy_footnote.footnote_marker is None
+    assert legacy_footnote.footnote_id is not None
+    assert legacy_footnote.footnote_id.text is None
     assert legacy_footnote.continuation is None
 
 

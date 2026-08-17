@@ -4,6 +4,7 @@ import re
 from collections.abc import Mapping
 from difflib import SequenceMatcher
 
+from article_translator.application.footnotes import project_footnotes
 from article_translator.domain.enums import BlockType, ManualInsertionReason, SegmentHandling
 from article_translator.domain.models import (
     DocumentTranslation,
@@ -23,6 +24,23 @@ def compile_text(
 
     overrides = editorial_overrides or {}
     resolved_types = type_overrides or {}
+    blocks = [block for page in document.pages for block in page.blocks]
+    effective_text_by_id = {
+        block.block_id: overrides.get(block.block_id, block.translated_text) for block in blocks
+    }
+    footnote_projections = project_footnotes(
+        blocks,
+        effective_text_by_id=effective_text_by_id,
+        type_overrides=resolved_types,
+    )
+    merged_footnote_ids = {
+        fragment_id
+        for projection in footnote_projections
+        for fragment_id in projection.fragment_ids[1:]
+    }
+    merged_text_by_first_id = {
+        projection.first_block.block_id: projection.text for projection in footnote_projections
+    }
     parts: list[str] = []
     part_by_block_id: dict[str, int] = {}
     list_items: list[str] = []
@@ -32,6 +50,10 @@ def compile_text(
             if not _should_include(block, settings, block_type=block_type):
                 continue
             effective_text = overrides.get(block.block_id, block.translated_text)
+            if block.block_id in merged_footnote_ids:
+                continue
+            if block.block_id in merged_text_by_first_id:
+                effective_text = merged_text_by_first_id[block.block_id]
             if block_type is BlockType.LIST_ITEM:
                 if effective_text is not None and effective_text.strip():
                     list_items.append(f"- {_plain_text(effective_text)}")
@@ -75,19 +97,28 @@ def compile_latex(
     effective_text_by_id = {
         block.block_id: overrides.get(block.block_id, block.translated_text) for block in blocks
     }
+    footnote_projections = project_footnotes(
+        blocks,
+        effective_text_by_id=effective_text_by_id,
+        type_overrides=resolved_types,
+        owner_overrides=resolved_owners,
+    )
     owned_footnotes: dict[str, list[tuple[TranslatedBlock, str, int]]] = {}
-    for footnote in blocks:
-        if resolved_types.get(footnote.block_id, footnote.type) is not BlockType.FOOTNOTE:
-            continue
-        owner_id, anchor_offset, owner_review_required = resolved_owners.get(
-            footnote.block_id,
-            (
-                footnote.footnote_owner_block_id,
-                footnote.footnote_anchor_offset,
-                footnote.footnote_owner_review_required,
-            ),
-        )
-        note_text = effective_text_by_id.get(footnote.block_id)
+    owned_footnote_ids: set[str] = set()
+    merged_footnote_ids = {
+        fragment_id
+        for projection in footnote_projections
+        for fragment_id in projection.fragment_ids[1:]
+    }
+    merged_text_by_first_id = {
+        projection.first_block.block_id: projection.text for projection in footnote_projections
+    }
+    for projection in footnote_projections:
+        footnote = projection.first_block
+        owner_id = projection.owner_block_id
+        anchor_offset = projection.anchor_offset
+        owner_review_required = projection.owner_review_required
+        note_text = projection.text
         owner = blocks_by_id.get(owner_id) if owner_id is not None else None
         owner_text = effective_text_by_id.get(owner_id) if owner_id is not None else None
         if owner_id is None or owner_review_required:
@@ -100,6 +131,7 @@ def compile_latex(
             anchor_offset,
         )
         owned_footnotes.setdefault(owner_id, []).append((footnote, note_text, mapped_offset))
+        owned_footnote_ids.update(projection.fragment_ids)
     parts: list[str] = []
     part_by_block_id: dict[str, int] = {}
     list_items: list[str] = []
@@ -114,12 +146,12 @@ def compile_latex(
             if not _should_include(block, settings, block_type=block_type):
                 continue
             effective_text = overrides.get(block.block_id, block.translated_text)
-            if block_type is BlockType.FOOTNOTE and any(
-                block.block_id == footnote.block_id
-                for footnotes in owned_footnotes.values()
-                for footnote, _, _ in footnotes
-            ):
+            if block.block_id in owned_footnote_ids:
                 continue
+            if block.block_id in merged_footnote_ids:
+                continue
+            if block.block_id in merged_text_by_first_id:
+                effective_text = merged_text_by_first_id[block.block_id]
             if block_type is BlockType.LIST_ITEM:
                 if effective_text is not None and effective_text.strip():
                     list_items.append(_latex_text(effective_text))
@@ -219,7 +251,11 @@ def _render_text_block(
     if resolved_type is BlockType.TABLE:
         return _plain_table(effective_text)
     if resolved_type is BlockType.FOOTNOTE:
-        marker = f" {block.footnote_marker}" if block.footnote_marker else ""
+        marker = (
+            f" {block.footnote_id.text}"
+            if block.footnote_id is not None and block.footnote_id.text
+            else ""
+        )
         return f"Footnote{marker}: {_plain_text(effective_text)}"
     return _plain_text(effective_text)
 
@@ -254,9 +290,7 @@ def _render_latex_block(
     if resolved_type is BlockType.CAPTION:
         return f"\\begin{{center}}\\small\\textit{{{text}}}\\end{{center}}"
     if resolved_type is BlockType.FOOTNOTE:
-        marker = f" {block.footnote_marker}" if block.footnote_marker else ""
-        label = _latex_text(f"Footnote{marker}")
-        return _latex_quote(f"\\small\\textbf{{{label} (owner requires review):}} {text}")
+        return _latex_quote(f"\\small\\textbf{{Footnote (owner requires review):}} {text}")
     if resolved_type is BlockType.EQUATION:
         return _latex_quote(f"\\ttfamily {text}")
     return f"{text}\\par"

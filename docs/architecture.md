@@ -172,7 +172,7 @@ Never overload the phrase “page number”:
 
 Every request contains exactly one current-page PNG, that page's complete
 Markdown, and the fully resolved translation settings. The primary pass uses
-`translate-page-v6`. When that pass tags at least one table or table-like region,
+`translate-page-v7`. When that pass tags at least one table or table-like region,
 the pipeline immediately makes one additional batched request for that page using
 `reconstruct-tables-v1`; it sends the same PNG and complete page MarkItDown/OCR,
 plus the first-pass segmentation and exact table targets. Multiple table regions
@@ -253,14 +253,17 @@ identity without wrapping the GFM table in a floating layout construct.
 Figures are not sent through the table follow-up. They remain ordered, text-free
 manual-insertion blocks for the reviewer.
 
-Footnotes are classified by their document function rather than by position,
-font size, marker presence, or proportion of the page. A footnote can be short,
-fill most or all of a page, or continue without repeating its marker. Footnote
-blocks remain translated content and carry an optional printed marker plus an
-explicit continuation state; ambiguous relationships are marked for
-classification review instead of being guessed. Running headers, page numbers,
-catchwords, digitizer watermarks, and printer gathering signatures are kept out
-of the footnote category.
+Footnotes are classified by document function rather than position, font size,
+marker presence, or proportion of the page. Each note carries a semantic ID
+`fn-p<starting-page>-n<sequence>`, optional exact printed-reference evidence, and
+required `appearance` and `handling` descriptions. A starting fragment places an
+ID-bearing control token at its exact translated entrypoint. The pipeline removes
+the token, records its owner and Unicode offset, and requires an incoming fragment
+to reuse the immediately preceding fragment's identity. Canonical continuation
+links preserve page-local serialization while exporters merge same-ID text in
+physical-page order. Ambiguous type, ownership, and continuation remain explicit
+review work rather than guesses. Running headers, page numbers, catchwords,
+digitizer watermarks, and printer gathering signatures stay outside this category.
 
 Uncertainty is not a confidence probability. The initial contract records:
 
@@ -354,9 +357,11 @@ cell transcription. Figure regions retain ordered, text-free manual-insertion
 placeholders.
 
 `runs/<run-id>/output/document.tex` is the primary compiled projection. It emits
-safe XeLaTeX source directly from canonical blocks, inserts owned notes as real
-`\footnote{...}` commands at their trusted owner offsets, and leaves unowned notes
-as visibly review-required standalone material. `runs/<run-id>/output/document.md`
+safe XeLaTeX source directly from canonical blocks, merges cross-page fragments,
+and inserts each owned note once as `\footnote{...}` at its trusted owner offset.
+The printed reference evidence is not emitted; LaTeX generates the display marker.
+Unowned notes remain visibly review-required standalone material.
+`runs/<run-id>/output/document.md`
 is an additional projection that:
 
 - emits invisible physical-page comments when configured;
@@ -518,14 +523,16 @@ responses. It does not parse `document.md` to rebuild pages or blocks.
 - Prompt evolution: update the applicable resource, bump `PROMPT_VERSION` and/or
   `TABLE_PROMPT_VERSION`, and add checkpoint-invalidation tests.
 
-New core persisted artifacts use schema version 5.0 because footnote ownership,
-reconstructed-table handling, and per-pass provenance are canonical. Filesystem
-reads apply explicit in-memory schema 2.0, 3.0, and 4.0 compatibility migrations
-without rewriting immutable artifacts. Migrated footnotes retain their text but
-receive unknown ownership that must be reviewed. Schema 2.0 translated tables
+New core persisted artifacts use schema version 6.0 because stable footnote
+identity, descriptions, cross-page links, ownership, reconstructed-table handling,
+and per-pass provenance are canonical. Filesystem reads apply explicit in-memory
+schema 2.0 through 5.0 compatibility migrations without rewriting immutable
+artifacts. Legacy footnotes retain their text but receive synthetic per-block IDs,
+an explicit legacy description, and unknown ownership where applicable; their
+cross-page relationships are not guessed. Schema 2.0 translated tables
 remain marked as legacy translated tables; schema 3.0 manual table placeholders
 remain marked as legacy manual
-tables. Neither is presented as a schema 5.0 reconstruction or automatically
+tables. Neither is presented as a schema 6.0 reconstruction or automatically
 sent through the new follow-up. Translated figures are rejected because they were
 never valid schema 2.0 blocks. Version 1.0 manifests and translations remain
 rejected; no run identity is inferred for them.

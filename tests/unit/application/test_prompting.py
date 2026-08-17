@@ -78,24 +78,26 @@ def test_prompt_contains_resolved_settings_and_delimited_page_markdown() -> None
     assert "Physical PDF page: 7" in prompt
     assert '"style": "faithful"' in prompt
     assert '"Kolera": "cholera"' in prompt
-    assert "authoritative translation" in prompt
-    assert "assertion for this document" in prompt
+    assert "authoritative" in prompt
     assert "one structured block variant" in prompt
-    assert "dedicated second model" in prompt
+    assert "dedicated second pass" in prompt
     assert f"Table follow-up prompt version: {TABLE_PROMPT_VERSION}" in prompt
-    assert "Continuous prose printed in columns" in prompt
+    assert "two-dimensional alignment" in prompt
     assert "Translate captions" in prompt
-    assert "nearly an entire\n   page" in prompt
+    assert "nearly an entire page" in prompt
     assert "from_previous_page" in prompt
     assert "from_previous_and_to_next_page" in prompt
-    assert "printer\n   signatures" in prompt
+    assert "printer signatures" in prompt
     assert 'type="figure"' in prompt
     assert "classification_review_required=true" in prompt
     assert "paragraph_continuation" in prompt
     assert "unfinished-paragraph variable" in prompt
-    assert "whether the first body block continues" in prompt
-    assert "[[FOOTNOTE_1]]" in prompt
-    assert "owner_reference_token" in prompt
+    assert "immediately preceding physical page" in prompt
+    assert "[[FOOTNOTE:<id>]]" in prompt
+    assert "entrypoint_token" in prompt
+    assert "fn-p<START_PAGE>-n<SEQUENCE>" in prompt
+    assert "appearance" in prompt
+    assert "handling" in prompt
     assert "owner_review_required=true" in prompt
     assert "SOURCE_MARKDOWN_START\n# Om Kolera\nSOURCE_MARKDOWN_END" in prompt
 

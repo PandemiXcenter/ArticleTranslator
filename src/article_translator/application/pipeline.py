@@ -499,6 +499,15 @@ def _to_translated_blocks(
         if previous_page is not None
         else None
     )
+    previous_footnotes_by_id = (
+        {
+            block.footnote_id.id: block
+            for block in previous_page.blocks
+            if block.type is BlockType.FOOTNOTE and block.footnote_id is not None
+        }
+        if previous_page is not None
+        else {}
+    )
     translated_text_by_order: dict[int, str] = {}
     owner_by_token: dict[str, tuple[str, int]] = {}
     for generated in generated_blocks:
@@ -529,8 +538,40 @@ def _to_translated_blocks(
             continues_from_block_id = previous_body.block_id
         owner_block_id = None
         owner_offset = None
-        if isinstance(block, GeneratedFootnoteBlock) and block.owner_reference_token is not None:
-            owner_block_id, owner_offset = owner_by_token[block.owner_reference_token]
+        owner_review_required = None
+        footnote_continues_from_block_id = None
+        if isinstance(block, GeneratedFootnoteBlock):
+            starting_page = int(block.footnote_id.id.split("-", 2)[1][1:])
+            if _continues_from_previous_page(block.continuation):
+                if starting_page >= original_page_number:
+                    raise ValueError(
+                        "A continued footnote ID must retain its earlier starting page"
+                    )
+                previous_footnote = previous_footnotes_by_id.get(block.footnote_id.id)
+                if previous_footnote is None or previous_footnote.footnote_id != block.footnote_id:
+                    raise ValueError(
+                        "A continued footnote must reuse the same ID and reference text from "
+                        "the immediately previous page"
+                    )
+                if previous_footnote.continuation not in {
+                    SegmentContinuation.TO_NEXT_PAGE,
+                    SegmentContinuation.FROM_PREVIOUS_AND_TO_NEXT_PAGE,
+                    SegmentContinuation.UNKNOWN,
+                }:
+                    raise ValueError(
+                        "A continued footnote follows a fragment that was marked complete"
+                    )
+                owner_block_id = previous_footnote.footnote_owner_block_id
+                owner_offset = previous_footnote.footnote_anchor_offset
+                owner_review_required = previous_footnote.footnote_owner_review_required
+                footnote_continues_from_block_id = previous_footnote.block_id
+            elif starting_page != original_page_number:
+                raise ValueError("A new footnote ID must name the current physical page")
+            elif block.entrypoint_token is not None:
+                owner_block_id, owner_offset = owner_by_token[block.entrypoint_token]
+                owner_review_required = False
+            else:
+                owner_review_required = block.owner_review_required
         translated.append(
             _to_translated_block(
                 original_page_number,
@@ -539,6 +580,8 @@ def _to_translated_blocks(
                 translated_text_override=translated_text_by_order.get(block.order),
                 footnote_owner_block_id=owner_block_id,
                 footnote_anchor_offset=owner_offset,
+                footnote_owner_review_required=owner_review_required,
+                footnote_continues_from_block_id=footnote_continues_from_block_id,
             )
         )
     return translated
@@ -551,7 +594,7 @@ def _strip_footnote_reference_tokens(value: str) -> tuple[str, dict[str, int]]:
     offsets: dict[str, int] = {}
     cursor = 0
     rendered_length = 0
-    for match in re.finditer(r"\[\[FOOTNOTE_[1-9]\d*\]\]", value):
+    for match in re.finditer(r"\[\[FOOTNOTE:fn-p[1-9]\d*-n[1-9]\d*\]\]", value):
         prefix = value[cursor : match.start()]
         parts.append(prefix)
         rendered_length += len(prefix)
@@ -572,6 +615,8 @@ def _to_translated_block(
     translated_text_override: str | None = None,
     footnote_owner_block_id: str | None = None,
     footnote_anchor_offset: int | None = None,
+    footnote_owner_review_required: bool | None = None,
+    footnote_continues_from_block_id: str | None = None,
 ) -> TranslatedBlock:
     block_id = f"p{original_page_number:04d}-b{block.order:04d}"
     if isinstance(block, GeneratedManualInsertionBlock):
@@ -596,11 +641,17 @@ def _to_translated_block(
             source_text=block.source_text,
             translated_text=block.translated_text,
             segment_handling=SegmentHandling.TRANSLATE,
-            footnote_marker=block.footnote_marker,
+            footnote_id=block.footnote_id,
+            footnote_description=block.description,
             footnote_owner_block_id=footnote_owner_block_id,
             footnote_anchor_offset=footnote_anchor_offset,
-            footnote_owner_review_required=block.owner_review_required,
+            footnote_owner_review_required=(
+                block.owner_review_required
+                if footnote_owner_review_required is None
+                else footnote_owner_review_required
+            ),
             continuation=block.continuation,
+            footnote_continues_from_block_id=footnote_continues_from_block_id,
             uncertainties=block.uncertainties,
             classification_review_required=block.classification_review_required,
         )
@@ -618,6 +669,13 @@ def _to_translated_block(
         segment_handling=SegmentHandling.TRANSLATE,
         classification_review_required=block.classification_review_required,
     )
+
+
+def _continues_from_previous_page(value: SegmentContinuation) -> bool:
+    return value in {
+        SegmentContinuation.FROM_PREVIOUS_PAGE,
+        SegmentContinuation.FROM_PREVIOUS_AND_TO_NEXT_PAGE,
+    }
 
 
 def _pending_table_blocks(translation: PageTranslation) -> list[TranslatedBlock]:

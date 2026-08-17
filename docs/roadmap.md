@@ -21,8 +21,8 @@ Implemented:
 - immutable translation runs, per-page atomic checkpoints, intermediate
   first-pass table checkpoints, and stage-aware safe resume;
 - canonical JSON dataset and deterministic machine XeLaTeX and Markdown compilers;
-- schema 5.0 footnote-ownership/table-reconstruction contracts and read-only
-  schema 2.0/3.0/4.0 compatibility migrations;
+- schema 6.0 footnote-identity/description/ownership and table-reconstruction
+  contracts, with read-only schema 2.0–5.0 compatibility migrations;
 - unit, local-integration, and fake-provider end-to-end tests.
 
 Still required before production claims:
@@ -42,9 +42,9 @@ Implemented:
 
 - strict per-page structured output with block types and qualitative
   uncertainties;
-- page-local model footnote-reference tokens resolved by the pipeline into
-  trusted owner block IDs and character offsets, with unknown ownership retained
-  for review;
+- semantic ID-bearing footnote entrypoint tokens resolved into trusted owner
+  block IDs and character offsets, with same-ID next-page fragments linked and
+  merged at export and unknown ownership retained for review;
 - corpus-informed segment rules: two-dimensional tables and table-like regions
   become ordered text-free first-pass tags, while surrounding prose, captions,
   and notes remain translated;
@@ -56,8 +56,9 @@ Implemented:
 - reconstructed table provenance and
   `segment_handling="table_reconstruction"`, with machine Markdown but no claim
   of exact cell-level `source_text`; figures remain manual insertions;
-- functional footnote classification with optional markers and explicit
-  continuation metadata for short, full-page, and cross-page notes;
+- functional footnote classification with printed-reference provenance, required
+  appearance/handling descriptions, and explicit continuation metadata for short,
+  full-page, and cross-page notes;
 - required body-paragraph continuation state, next-page confirmation, and
   pipeline-owned links to the preceding page's final body block;
 - one-paragraph Markdown projection for confirmed cross-page fragments while

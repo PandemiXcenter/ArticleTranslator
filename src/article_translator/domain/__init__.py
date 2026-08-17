@@ -12,6 +12,8 @@ from article_translator.domain.enums import (
 )
 from article_translator.domain.models import (
     DocumentTranslation,
+    FootnoteDescription,
+    FootnoteIdentity,
     GeneratedBlock,
     GeneratedFootnoteBlock,
     GeneratedManualInsertionBlock,
@@ -31,6 +33,8 @@ __all__ = [
     "BlockType",
     "DocumentTranslation",
     "ExtractionStatus",
+    "FootnoteDescription",
+    "FootnoteIdentity",
     "GeneratedBlock",
     "GeneratedFootnoteBlock",
     "GeneratedManualInsertionBlock",

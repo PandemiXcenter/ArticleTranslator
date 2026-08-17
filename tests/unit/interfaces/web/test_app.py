@@ -343,6 +343,8 @@ def test_review_frontend_mounts_all_pages_and_uses_delegated_handlers(
     assert "section-type-select" in javascript
     assert "footnote-owner-select" in javascript
     assert "footnote-anchor-input" in javascript
+    assert "Footnote description" in javascript
+    assert "printed reference" in javascript
     assert "Marker after character" in javascript
     assert 'translationContent.addEventListener("change", handleReviewControlChange)' in javascript
     assert "function deleteLibraryReview" in javascript

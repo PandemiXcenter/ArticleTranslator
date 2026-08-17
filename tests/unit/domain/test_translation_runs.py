@@ -49,7 +49,7 @@ def test_manifest_round_trips_ordered_translation_run_index() -> None:
 
     assert restored.translation_run_id == RUN_ID
     assert restored.translation_run_ids == [RUN_ID]
-    assert restored.schema_version == "5.0"
+    assert restored.schema_version == "6.0"
     assert restored.auto_continue is True
     assert restored.auto_continue_attempts == 3
 
