@@ -125,6 +125,127 @@ def _document(
     )
 
 
+def _continued_document() -> DocumentTranslation:
+    first = TranslatedBlock(
+        block_id="p0001-b0001",
+        original_page_number=1,
+        order=1,
+        type=BlockType.BODY,
+        source_text="første del",
+        translated_text="The paragraph begins",
+        paragraph_continuation=SegmentContinuation.TO_NEXT_PAGE,
+    )
+    second = TranslatedBlock(
+        block_id="p0002-b0001",
+        original_page_number=2,
+        order=1,
+        type=BlockType.BODY,
+        source_text="anden del",
+        translated_text="and ends on page two.",
+        paragraph_continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
+        continues_from_block_id=first.block_id,
+    )
+    first_page = _document(translated_block=first).pages[0]
+    second_page = PageTranslation(
+        translation_run_id=RUN_ID,
+        original_page_number=2,
+        extraction_status=ExtractionStatus.EXTRACTED,
+        extracted_character_count=9,
+        source_markdown="anden del",
+        source_markdown_artifact=_artifact("prepared/page-two.md", "text/markdown"),
+        source_image=_artifact("prepared/page-two.png", "image/png"),
+        blocks=[second],
+        input_fingerprint=HASH,
+        provider=ProviderMetadata(
+            provider="fake",
+            model="fake-model",
+            prompt_version="test",
+        ),
+        translated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    return DocumentTranslation(
+        translation_run_id=RUN_ID,
+        document_id=HASH,
+        job_id="job-one",
+        source_file_name="source.pdf",
+        source_file_sha256=HASH,
+        page_count=2,
+        translation_settings=TranslationSettings(),
+        pages=[first_page, second_page],
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+
+def test_review_api_validates_cross_page_paragraph_in_one_command(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    repository = FilesystemArtifactRepository(job_dir)
+    repository.write_document(RUN_ID, _continued_document())
+    config = load_project_config(Path("config/default.toml"))
+    config = config.model_copy(
+        update={"paths": config.paths.model_copy(update={"artifacts_dir": tmp_path / "artifacts"})}
+    )
+    app = create_app(
+        config,
+        job_manager=cast(WebJobManager, ReadyJobManager(job_dir)),
+        secret_store=DotenvSecretStore(tmp_path / ".env"),
+    )
+    job_path = f"/api/jobs/{'b' * 32}"
+    payload = {
+        "paragraph_id": "p0001-b0001",
+        "fragments": [
+            {
+                "block_id": "p0001-b0001",
+                "editorial_text": "The paragraph now begins",
+                "expected_base_revision": 0,
+            },
+            {
+                "block_id": "p0002-b0001",
+                "editorial_text": "and now ends seamlessly.",
+                "expected_base_revision": 0,
+            },
+        ],
+        "status": "accepted",
+    }
+
+    with TestClient(app) as client:
+        initial = client.get(f"{job_path}/review")
+        rejected = client.post(f"{job_path}/paragraph-revisions", json=payload)
+        client.get("/")
+        revised = client.post(
+            f"{job_path}/paragraph-revisions",
+            json=payload,
+            headers={"X-CSRF-Token": client.cookies["at_csrf"]},
+        )
+        stale = client.post(
+            f"{job_path}/paragraph-revisions",
+            json=payload,
+            headers={"X-CSRF-Token": client.cookies["at_csrf"]},
+        )
+
+    assert initial.status_code == 200
+    assert initial.json()["paragraph_groups"] == [
+        {
+            "paragraph_id": "p0001-b0001",
+            "fragment_block_ids": ["p0001-b0001", "p0002-b0001"],
+            "original_page_numbers": [1, 2],
+        }
+    ]
+    assert rejected.status_code == 403
+    assert revised.status_code == 200
+    revised_blocks = [block for page in revised.json()["pages"] for block in page["blocks"]]
+    assert [block["effective_text"] for block in revised_blocks] == [
+        "The paragraph now begins",
+        "and now ends seamlessly.",
+    ]
+    assert [block["base_revision"] for block in revised_blocks] == [1, 1]
+    assert [block["review_status"] for block in revised_blocks] == ["accepted", "accepted"]
+    assert stale.status_code == 409
+    assert [
+        len(repository.list_block_revisions(HASH, RUN_ID, block_id))
+        for block_id in ("p0001-b0001", "p0002-b0001")
+    ] == [1, 1]
+
+
 def test_review_revision_replace_all_and_export_contract(tmp_path: Path) -> None:
     job_dir = tmp_path / "job"
     FilesystemArtifactRepository(job_dir).write_document(RUN_ID, _document())

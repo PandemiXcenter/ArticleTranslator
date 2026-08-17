@@ -91,13 +91,17 @@ For body text, the primary model must populate a `paragraph_continuation` state.
 On the next physical page it uses the prior projection to decide whether the
 first body block continues the preceding page's final body block. A confirmed
 continuation receives a pipeline-owned `continues_from_block_id` link. Canonical
-blocks remain page-local and independently revisable, while Markdown export joins
-the linked fragments into one paragraph and places the new physical-page comment
-inline at the join. This cannot retroactively rewrite the preceding fragment.
+blocks remain page-local and independently revisable. The model is instructed to
+word the current fragment so a direct join is grammatically seamless. Review
+groups the linked fragments into one visual paragraph with fixed inline page
+markers and one Save/Validate action, while recording one append-only revision per
+physical-page fragment. Markdown, text, and LaTeX exports emit one paragraph; page
+comments remain inline at each join. This cannot retroactively rewrite the
+preceding machine fragment.
 
 The same context can resolve a word, sentence, heading, footnote, or table
 continuation that enters the current page. The main contract is versioned as
-`translate-page-v8`; the table contract is `reconstruct-tables-v1`.
+`translate-page-v9`; the table contract is `reconstruct-tables-v1`.
 
 ## Quick start: local interface
 
@@ -477,8 +481,8 @@ The live Gemini path has not been verified by the automated suite.
 - The interface has no authentication, remote deployment configuration, durable
   task queue, multi-process coordination, or interruption of an active request.
   It is deliberately restricted to loopback use.
-- Review currently edits whole block text and review status. Block split/merge,
-  type correction, editor identities, and a dedicated revision-history screen
-  remain deferred.
+- Review keeps cross-page paragraph boundaries immutable while presenting their
+  fragments as one paragraph. Arbitrary block split/reorder operations, editor
+  identities, and a dedicated revision-history screen remain deferred.
 - The live Gemini path requires a real account/key and incurs provider cost; the
   automated suite verifies the adapter boundary without making a live request.

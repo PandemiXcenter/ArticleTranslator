@@ -63,6 +63,18 @@ class BlockRevisionRequest(ApiModel):
     status: ReviewStatus
 
 
+class ParagraphFragmentRevisionRequest(ApiModel):
+    block_id: BlockId
+    editorial_text: NonEmptyText
+    expected_base_revision: int = Field(ge=0)
+
+
+class ParagraphRevisionRequest(ApiModel):
+    paragraph_id: BlockId
+    fragments: list[ParagraphFragmentRevisionRequest] = Field(min_length=2)
+    status: ReviewStatus
+
+
 class ReviewPositionRequest(ApiModel):
     original_page_number: int = Field(ge=1)
 

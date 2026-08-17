@@ -1145,8 +1145,54 @@ progress::-moz-progress-bar {
   box-shadow: 0 0 0 2px rgb(36 95 120 / 12%);
 }
 
-.translation-block.is-dirty .translated-editor {
+.translation-block:not(.paragraph-group).is-dirty .translated-editor {
   border-left: 3px solid var(--accent);
+}
+
+.paragraph-group {
+  border-left: 3px solid var(--focus);
+}
+
+.merged-paragraph-editor {
+  padding: 0.65rem 0.5rem;
+  border: 1px solid transparent;
+  line-height: 1.7;
+}
+
+.paragraph-fragment-editor {
+  display: inline;
+  min-height: 0;
+  padding: 0.15rem 0.1rem;
+}
+
+.paragraph-fragment-editor.is-dirty {
+  border-left: 3px solid var(--accent);
+}
+
+.paragraph-page-boundary {
+  display: inline-flex;
+  margin: 0 0.3rem;
+  padding: 0.12rem 0.38rem;
+  border: 1px solid var(--focus);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--focus);
+  font: inherit;
+  font-size: 0.66rem;
+  font-weight: 760;
+  vertical-align: 0.12em;
+  cursor: pointer;
+}
+
+.paragraph-page-boundary:hover,
+.paragraph-page-boundary:focus-visible {
+  background: rgb(36 95 120 / 10%);
+}
+
+.paragraph-group-help {
+  margin: 0.35rem 0.5rem 0;
+  color: var(--muted);
+  font-size: 0.72rem;
 }
 
 .continued-paragraph-block {

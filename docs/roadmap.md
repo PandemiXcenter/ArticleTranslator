@@ -169,6 +169,8 @@ Implemented:
   changes during validation;
 - delegated generated-control events;
 - block editing and validation backed by append-only revisions;
+- seamless cross-page paragraph groups with fixed page markers, one validation
+  action, and fragment-scoped revision history;
 - visible provenance distinguishing machine translations (including reconstructed
   tables), reviewed-unchanged blocks, and manually edited revisions;
 - visible qualitative uncertainty details and conditional Translate One /

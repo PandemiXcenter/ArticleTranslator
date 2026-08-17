@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from difflib import SequenceMatcher
 
 from article_translator.application.footnotes import project_footnotes
+from article_translator.application.paragraphs import ParagraphProjection, project_paragraphs
 from article_translator.domain.enums import BlockType, ManualInsertionReason, SegmentHandling
 from article_translator.domain.models import (
     DocumentTranslation,
@@ -41,8 +42,22 @@ def compile_text(
     merged_text_by_first_id = {
         projection.first_block.block_id: projection.text for projection in footnote_projections
     }
+    paragraph_projections = project_paragraphs(
+        blocks,
+        effective_text_by_id=effective_text_by_id,
+        type_overrides=resolved_types,
+    )
+    merged_paragraph_ids = {
+        fragment.block.block_id
+        for projection in paragraph_projections
+        for fragment in projection.fragments[1:]
+    }
+    merged_paragraph_text_by_first_id = {
+        projection.paragraph_id: _plain_paragraph(projection)
+        for projection in paragraph_projections
+        if len(projection.fragments) > 1
+    }
     parts: list[str] = []
-    part_by_block_id: dict[str, int] = {}
     list_items: list[str] = []
     for page in document.pages:
         for block in page.blocks:
@@ -52,8 +67,12 @@ def compile_text(
             effective_text = overrides.get(block.block_id, block.translated_text)
             if block.block_id in merged_footnote_ids:
                 continue
+            if block.block_id in merged_paragraph_ids:
+                continue
             if block.block_id in merged_text_by_first_id:
                 effective_text = merged_text_by_first_id[block.block_id]
+            if block.block_id in merged_paragraph_text_by_first_id:
+                effective_text = merged_paragraph_text_by_first_id[block.block_id]
             if block_type is BlockType.LIST_ITEM:
                 if effective_text is not None and effective_text.strip():
                     list_items.append(f"- {_plain_text(effective_text)}")
@@ -62,17 +81,7 @@ def compile_text(
             rendered = _render_text_block(block, effective_text, block_type=block_type)
             if not rendered:
                 continue
-            target_index = (
-                part_by_block_id.get(block.continues_from_block_id)
-                if block_type is BlockType.BODY and block.continues_from_block_id is not None
-                else None
-            )
-            if target_index is not None:
-                parts[target_index] = f"{parts[target_index].rstrip()} {rendered.lstrip()}"
-                part_by_block_id[block.block_id] = target_index
-            else:
-                parts.append(rendered)
-                part_by_block_id[block.block_id] = len(parts) - 1
+            parts.append(rendered)
         _flush_plain_list(parts, list_items)
 
     rendered_document = "\n\n".join(parts).rstrip()
@@ -132,13 +141,37 @@ def compile_latex(
         )
         owned_footnotes.setdefault(owner_id, []).append((footnote, note_text, mapped_offset))
         owned_footnote_ids.update(projection.fragment_ids)
+    paragraph_projections = project_paragraphs(
+        blocks,
+        effective_text_by_id=effective_text_by_id,
+        type_overrides=resolved_types,
+    )
+    merged_paragraph_ids = {
+        fragment.block.block_id
+        for projection in paragraph_projections
+        for fragment in projection.fragments[1:]
+    }
+    merged_paragraph_pages = {
+        fragment.block.original_page_number
+        for projection in paragraph_projections
+        for fragment in projection.fragments[1:]
+    }
+    merged_paragraph_text_by_first_id = {
+        projection.paragraph_id: _render_latex_paragraph(
+            projection,
+            owned_footnotes=owned_footnotes,
+            include_page_comments=settings.include_page_comments,
+        )
+        for projection in paragraph_projections
+        if len(projection.fragments) > 1
+    }
     parts: list[str] = []
-    part_by_block_id: dict[str, int] = {}
     list_items: list[str] = []
     for page in document.pages:
         page_marker = (
             f"% original-page: {page.original_page_number}"
             if settings.include_page_comments
+            and page.original_page_number not in merged_paragraph_pages
             else None
         )
         for block in page.blocks:
@@ -150,6 +183,8 @@ def compile_latex(
                 continue
             if block.block_id in merged_footnote_ids:
                 continue
+            if block.block_id in merged_paragraph_ids:
+                continue
             if block.block_id in merged_text_by_first_id:
                 effective_text = merged_text_by_first_id[block.block_id]
             if block_type is BlockType.LIST_ITEM:
@@ -159,35 +194,20 @@ def compile_latex(
             if _flush_latex_list(parts, list_items) and page_marker is not None:
                 parts.insert(len(parts) - 1, page_marker)
                 page_marker = None
-            rendered = _render_latex_block(
-                block,
-                effective_text,
-                block_type=block_type,
-                inline_footnotes=owned_footnotes.get(block.block_id, []),
-            )
+            rendered = merged_paragraph_text_by_first_id.get(block.block_id)
+            if rendered is None:
+                rendered = _render_latex_block(
+                    block,
+                    effective_text,
+                    block_type=block_type,
+                    inline_footnotes=owned_footnotes.get(block.block_id, []),
+                )
             if not rendered:
                 continue
-            target_index = (
-                part_by_block_id.get(block.continues_from_block_id)
-                if block_type is BlockType.BODY and block.continues_from_block_id is not None
-                else None
-            )
-            if target_index is not None:
-                boundary = ""
-                if settings.include_page_comments:
-                    boundary = (
-                        f"\n% original-page: {block.original_page_number}; "
-                        f"continues-from: {block.continues_from_block_id}\n"
-                    )
-                parts[target_index] = f"{parts[target_index].rstrip()}{boundary}{rendered.lstrip()}"
-                part_by_block_id[block.block_id] = target_index
+            if page_marker is not None:
+                parts.append(page_marker)
                 page_marker = None
-            else:
-                if page_marker is not None:
-                    parts.append(page_marker)
-                    page_marker = None
-                parts.append(rendered)
-                part_by_block_id[block.block_id] = len(parts) - 1
+            parts.append(rendered)
         if _flush_latex_list(parts, list_items) and page_marker is not None:
             parts.insert(len(parts) - 1, page_marker)
             page_marker = None
@@ -258,6 +278,38 @@ def _render_text_block(
         )
         return f"Footnote{marker}: {_plain_text(effective_text)}"
     return _plain_text(effective_text)
+
+
+def _plain_paragraph(projection: ParagraphProjection) -> str:
+    return " ".join(_plain_text(fragment.text).strip() for fragment in projection.fragments)
+
+
+def _render_latex_paragraph(
+    projection: ParagraphProjection,
+    *,
+    owned_footnotes: Mapping[str, list[tuple[TranslatedBlock, str, int]]],
+    include_page_comments: bool,
+) -> str:
+    rendered: list[str] = []
+    previous_block_id: str | None = None
+    for fragment in projection.fragments:
+        if rendered:
+            rendered.append(
+                (
+                    f"\n% original-page: {fragment.block.original_page_number}; "
+                    f"continues-from: {previous_block_id}\n"
+                )
+                if include_page_comments
+                else " "
+            )
+        rendered.append(
+            _latex_text_with_footnotes(
+                fragment.text,
+                owned_footnotes.get(fragment.block.block_id, []),
+            )
+        )
+        previous_block_id = fragment.block.block_id
+    return f"{''.join(rendered).rstrip()}\\par"
 
 
 def _render_latex_block(

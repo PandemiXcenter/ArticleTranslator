@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from difflib import SequenceMatcher
 
 from article_translator.application.footnotes import project_footnotes
+from article_translator.application.paragraphs import ParagraphProjection, project_paragraphs
 from article_translator.domain.enums import (
     BlockType,
     ManualInsertionReason,
@@ -68,15 +69,38 @@ def compile_markdown(
             (footnote, note_text, mapped_offset, projection.identity)
         )
         owned_footnote_ids.update(projection.fragment_ids)
+    paragraph_projections = project_paragraphs(
+        blocks,
+        effective_text_by_id=effective_text_by_id,
+        type_overrides=resolved_types,
+    )
+    merged_paragraph_ids = {
+        fragment.block.block_id
+        for projection in paragraph_projections
+        for fragment in projection.fragments[1:]
+    }
+    merged_paragraph_pages = {
+        fragment.block.original_page_number
+        for projection in paragraph_projections
+        for fragment in projection.fragments[1:]
+    }
+    merged_paragraph_text_by_first_id = {
+        projection.paragraph_id: _render_markdown_paragraph(
+            projection,
+            owned_footnotes=owned_footnotes,
+            include_page_comments=settings.include_page_comments,
+        )
+        for projection in paragraph_projections
+        if len(projection.fragments) > 1
+    }
     parts: list[str] = []
-    part_by_block_id: dict[str, int] = {}
     for page in document.pages:
         page_marker = (
             f"<!-- original-page: {page.original_page_number} -->"
             if settings.include_page_comments
+            and page.original_page_number not in merged_paragraph_pages
             else None
         )
-        page_has_output = False
         list_items: list[str] = []
 
         for block in page.blocks:
@@ -88,56 +112,36 @@ def compile_markdown(
                 continue
             if block.block_id in merged_footnote_ids:
                 continue
+            if block.block_id in merged_paragraph_ids:
+                continue
             if block.block_id in merged_text_by_first_id:
                 effective_text = merged_text_by_first_id[block.block_id]
-            if effective_text is not None and block.block_id in owned_footnotes:
+            if block.block_id in merged_paragraph_text_by_first_id:
+                rendered = merged_paragraph_text_by_first_id[block.block_id]
+            elif effective_text is not None and block.block_id in owned_footnotes:
                 effective_text = _insert_markdown_footnote_references(
                     effective_text,
                     owned_footnotes[block.block_id],
                 )
+                rendered = _render_block(block, effective_text, block_type=block_type)
+            else:
+                rendered = _render_block(block, effective_text, block_type=block_type)
             if block_type is BlockType.LIST_ITEM:
                 if effective_text is not None:
                     list_items.append(_render_list_item(effective_text))
                 continue
-            if _flush_list(parts, list_items):
-                if page_marker is not None:
-                    parts.insert(len(parts) - 1, page_marker)
-                    page_marker = None
-                page_has_output = True
-            rendered = _render_block(block, effective_text, block_type=block_type)
-            if not rendered:
-                continue
-            target_index = (
-                part_by_block_id.get(block.continues_from_block_id)
-                if block_type is BlockType.BODY and block.continues_from_block_id is not None
-                else None
-            )
-            if target_index is not None and not page_has_output:
-                boundary = (
-                    f"<!-- original-page: {page.original_page_number}; "
-                    f"continues-from: {block.continues_from_block_id} -->"
-                    if settings.include_page_comments
-                    else None
-                )
-                parts[target_index] = _join_paragraph_parts(
-                    parts[target_index],
-                    rendered,
-                    boundary,
-                )
-                part_by_block_id[block.block_id] = target_index
-                page_marker = None
-            else:
-                if page_marker is not None:
-                    parts.append(page_marker)
-                    page_marker = None
-                parts.append(rendered)
-                part_by_block_id[block.block_id] = len(parts) - 1
-            page_has_output = True
-        if _flush_list(parts, list_items):
-            if page_marker is not None:
+            if _flush_list(parts, list_items) and page_marker is not None:
                 parts.insert(len(parts) - 1, page_marker)
                 page_marker = None
-            page_has_output = True
+            if not rendered:
+                continue
+            if page_marker is not None:
+                parts.append(page_marker)
+                page_marker = None
+            parts.append(rendered)
+        if _flush_list(parts, list_items) and page_marker is not None:
+            parts.insert(len(parts) - 1, page_marker)
+            page_marker = None
 
         if page_marker is not None:
             parts.append(page_marker)
@@ -165,6 +169,36 @@ def _join_paragraph_parts(left: str, right: str, boundary: str | None) -> str:
         components.append(boundary)
     components.append(right.lstrip())
     return " ".join(components)
+
+
+def _render_markdown_paragraph(
+    projection: ParagraphProjection,
+    *,
+    owned_footnotes: Mapping[str, list[tuple[TranslatedBlock, str, int, str]]],
+    include_page_comments: bool,
+) -> str:
+    rendered = ""
+    previous_block_id: str | None = None
+    for fragment in projection.fragments:
+        text = fragment.text
+        if fragment.block.block_id in owned_footnotes:
+            text = _insert_markdown_footnote_references(
+                text,
+                owned_footnotes[fragment.block.block_id],
+            )
+        current = _render_block(fragment.block, text, block_type=BlockType.BODY)
+        if not rendered:
+            rendered = current
+        else:
+            boundary = (
+                f"<!-- original-page: {fragment.block.original_page_number}; "
+                f"continues-from: {previous_block_id} -->"
+                if include_page_comments
+                else None
+            )
+            rendered = _join_paragraph_parts(rendered, current, boundary)
+        previous_block_id = fragment.block.block_id
+    return rendered
 
 
 def _should_include(

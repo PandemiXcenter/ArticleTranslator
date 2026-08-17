@@ -11,11 +11,13 @@ from uuid import uuid4
 
 from article_translator.application.compile_markdown import compile_markdown
 from article_translator.application.export_reviewed import compile_latex, compile_text
+from article_translator.application.paragraphs import project_paragraphs
 from article_translator.domain.editorial import (
     BlockRevision,
     ReviewBlock,
     ReviewDocument,
     ReviewPage,
+    ReviewParagraphGroup,
     ReviewPosition,
     UncertaintyFallback,
     UncertaintyHighlight,
@@ -199,6 +201,71 @@ class EditorialService:
             )
             self._repository.append_block_revision(revision)
             return revision
+
+    def revise_paragraph(
+        self,
+        document: DocumentTranslation,
+        translation_run_id: str,
+        paragraph_id: str,
+        fragments: list[tuple[str, str, int]],
+        *,
+        status: ReviewStatus = ReviewStatus.IN_REVIEW,
+        editor: str | None = None,
+        note: str | None = None,
+    ) -> list[BlockRevision]:
+        """Append one fragment-scoped revision for every part of a visual paragraph."""
+
+        with self._lock:
+            review = self._review_document_unlocked(document, translation_run_id)
+            paragraph = _find_review_paragraph(review, paragraph_id)
+            requested_ids = [block_id for block_id, _, _ in fragments]
+            if requested_ids != paragraph.fragment_block_ids:
+                raise EditorialTargetError(
+                    "Paragraph revisions must contain every fragment in trusted order"
+                )
+
+            review_blocks = [_find_review_block(review, block_id) for block_id in requested_ids]
+            for block, (_, editorial_text, expected_base_revision) in zip(
+                review_blocks,
+                fragments,
+                strict=True,
+            ):
+                if block.type is not BlockType.BODY:
+                    raise EditorialTargetError("Paragraph revisions may contain only body text")
+                if not editorial_text.strip():
+                    raise EditorialError("Paragraph fragments must not be blank")
+                self._assert_base_revision(block, expected_base_revision)
+
+            revisions: list[BlockRevision] = []
+            for block, (_, editorial_text, _) in zip(
+                review_blocks,
+                fragments,
+                strict=True,
+            ):
+                resolved_ids = _resolved_ids_for_block(
+                    self._repository,
+                    document.document_id,
+                    translation_run_id,
+                    block.block_id,
+                )
+                revisions.append(
+                    _make_revision(
+                        document=document,
+                        translation_run_id=translation_run_id,
+                        block=block,
+                        editorial_text=editorial_text,
+                        effective_type=BlockType.BODY,
+                        footnote_owner_review_required=False,
+                        status=status,
+                        editor=editor,
+                        note=note,
+                        resolved_uncertainty_ids=resolved_ids,
+                    )
+                )
+
+            for revision in revisions:
+                self._repository.append_block_revision(revision)
+            return revisions
 
     def replace_uncertainty(
         self,
@@ -542,12 +609,28 @@ class EditorialService:
                     blocks=review_blocks,
                 )
             )
+        effective_text_by_id = {block_id: state[0] for block_id, state in block_states.items()}
+        effective_types = {block_id: state[4] for block_id, state in block_states.items()}
+        paragraph_groups = [
+            ReviewParagraphGroup(
+                paragraph_id=projection.paragraph_id,
+                fragment_block_ids=list(projection.fragment_block_ids),
+                original_page_numbers=list(projection.original_page_numbers),
+            )
+            for projection in project_paragraphs(
+                _iter_machine_blocks(document),
+                effective_text_by_id=effective_text_by_id,
+                type_overrides=effective_types,
+            )
+            if len(projection.fragments) > 1
+        ]
         return ReviewDocument(
             document_id=document.document_id,
             translation_run_id=translation_run_id,
             source_file_name=document.source_file_name,
             page_count=document.page_count,
             pages=pages,
+            paragraph_groups=paragraph_groups,
         )
 
     @staticmethod
@@ -603,6 +686,20 @@ def _find_review_block(document: ReviewDocument, block_id: str) -> ReviewBlock:
     matches = [block for block in _iter_review_blocks(document) if block.block_id == block_id]
     if len(matches) != 1:
         raise EditorialTargetError(f"Review block not found: {block_id}")
+    return matches[0]
+
+
+def _find_review_paragraph(
+    document: ReviewDocument,
+    paragraph_id: str,
+) -> ReviewParagraphGroup:
+    matches = [
+        paragraph
+        for paragraph in document.paragraph_groups
+        if paragraph.paragraph_id == paragraph_id
+    ]
+    if len(matches) != 1:
+        raise EditorialTargetError(f"Review paragraph not found: {paragraph_id}")
     return matches[0]
 
 

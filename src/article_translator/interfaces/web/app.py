@@ -48,6 +48,7 @@ from article_translator.interfaces.web.schemas import (
     ContinueJobRequest,
     GlossaryEntry,
     JobTranslationSettings,
+    ParagraphRevisionRequest,
     ReviewPositionRequest,
     UncertaintyReplacementRequest,
 )
@@ -336,6 +337,31 @@ def create_app(
             footnote_owner_block_id=command.footnote_owner_block_id,
             footnote_anchor_offset=command.footnote_anchor_offset,
             expected_base_revision=command.expected_base_revision,
+            status=command.status,
+        )
+        return _review_payload(service.review_document(document, translation_run_id))
+
+    @app.post("/api/jobs/{job_id}/paragraph-revisions")
+    def revise_paragraph(
+        job_id: str,
+        command: ParagraphRevisionRequest,
+        at_csrf: Annotated[str | None, Cookie()] = None,
+        x_csrf_token: Annotated[str | None, Header()] = None,
+    ) -> dict[str, object]:
+        _require_csrf(at_csrf, x_csrf_token)
+        document, translation_run_id, service, _ = _review_context(manager, job_id)
+        service.revise_paragraph(
+            document,
+            translation_run_id,
+            command.paragraph_id,
+            [
+                (
+                    fragment.block_id,
+                    fragment.editorial_text,
+                    fragment.expected_base_revision,
+                )
+                for fragment in command.fragments
+            ],
             status=command.status,
         )
         return _review_payload(service.review_document(document, translation_run_id))
@@ -683,6 +709,7 @@ def _review_payload(review: ReviewDocument) -> dict[str, object]:
         "source_file_name": review.source_file_name,
         "page_count": review.page_count,
         "uncertainty_groups": _uncertainty_group_payload(review),
+        "paragraph_groups": [group.model_dump(mode="json") for group in review.paragraph_groups],
         "pages": [
             {
                 "original_page_number": page.original_page_number,

@@ -378,6 +378,14 @@ def test_review_frontend_mounts_all_pages_and_uses_delegated_handlers(
     assert "link.href = exportUrl(jobId, format)" in javascript
     assert "open-uncertainty-group" in javascript
     assert "continued-paragraph-block" in javascript
+    assert "function makeParagraphGroup" in javascript
+    assert "function saveParagraphGroup" in javascript
+    assert 'save.dataset.action = "save-paragraph"' in javascript
+    assert 'validate.dataset.action = "save-paragraph"' in javascript
+    assert 'boundary.dataset.action = "show-paragraph-page"' in javascript
+    assert "/paragraph-revisions" in javascript
+    assert "merged-paragraph-editor" in javascript
+    assert "paragraph-page-boundary page-sync-anchor" in javascript
     assert "Table-bearing pages send that page again" in html
     assert "previous_page_context_count" in javascript
 

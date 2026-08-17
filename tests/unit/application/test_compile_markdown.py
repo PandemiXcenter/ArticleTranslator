@@ -254,6 +254,14 @@ def test_compiler_links_confirmed_cross_page_body_as_one_paragraph() -> None:
         "The first half <!-- original-page: 2; continues-from: p0001-b0001 --> "
         "the second half.\n"
     )
+    assert (
+        compile_markdown(
+            continued_document,
+            MarkdownExportSettings(include_page_comments=False),
+            editorial_overrides={second.block_id: "an edited second half."},
+        )
+        == "The first half an edited second half.\n"
+    )
 
 
 def test_compiler_keeps_table_anchor_between_surrounding_paragraphs() -> None:

@@ -10,6 +10,8 @@ const state = {
   uncertaintyIndex: new Map(),
   uncertaintyGroups: [],
   reviewPages: [],
+  paragraphGroups: [],
+  paragraphGroupByFragment: new Map(),
   reviewDrafts: new Map(),
   footnoteEntrypointsByOwner: new Map(),
   sourcePageNumber: null,
@@ -985,6 +987,8 @@ function makePageLabel(page) {
     `Physical page ${Number(page.original_page_number) || 1}`,
   );
   const details = pageDescription(page);
+  label.classList.add("page-sync-anchor");
+  label.dataset.pageNumber = asText(page.original_page_number);
   if (details) {
     label.append(createElement("span", "", details));
   }
@@ -1221,14 +1225,18 @@ function insertPlainTextAtSelection(editor, text) {
 
 function setBlockDirty(blockElement, editor, effectiveText) {
   const dirty = editorPlainText(editor) !== effectiveText;
-  blockElement.classList.toggle("is-dirty", dirty);
+  editor.classList.toggle("is-dirty", dirty);
+  blockElement.classList.toggle(
+    "is-dirty",
+    Boolean(blockElement.querySelector(".translated-editor.is-dirty")),
+  );
   editor.setAttribute("aria-invalid", "false");
   return dirty;
 }
 
 function recordEditorDraft(editor) {
   const blockElement = editor.closest(".translation-block");
-  const blockId = asText(blockElement?.dataset.blockId);
+  const blockId = asText(editor.dataset.blockId, blockElement?.dataset.blockId);
   const entry = state.blockIndex.get(blockId);
   if (!blockElement || !entry) {
     return;
@@ -1249,8 +1257,29 @@ function handleReviewClick(event) {
     return;
   }
   const action = actionTarget.dataset.action;
+  if (action === "show-paragraph-page") {
+    event.preventDefault();
+    activateSourcePageNumber(Number(actionTarget.dataset.pageNumber));
+    return;
+  }
   if (action === "review-uncertainty") {
     activateUncertaintyFromEvent(event, actionTarget.dataset.uncertaintyId);
+    return;
+  }
+  if (action === "save-paragraph") {
+    const blockElement = actionTarget.closest(".paragraph-group");
+    const paragraphId = asText(blockElement?.dataset.paragraphId);
+    const paragraph = state.paragraphGroups.find(
+      (candidate) => asText(candidate.paragraph_id) === paragraphId,
+    );
+    const message = blockElement?.querySelector(".block-message");
+    if (!blockElement || !paragraph || !message) {
+      return;
+    }
+    const buttons = [...blockElement.querySelectorAll("[data-action='save-paragraph']")];
+    const status =
+      actionTarget.dataset.reviewStatus === "accepted" ? "accepted" : "in_review";
+    void saveParagraphGroup(paragraph, blockElement, status, buttons, message);
     return;
   }
   if (action !== "save-block") {
@@ -1390,6 +1419,23 @@ function showSourcePage(page) {
   fullSizePageLink.href = url;
 }
 
+function activateSourcePageNumber(pageNumber, { persist = true } = {}) {
+  const pageEntry = state.reviewPages.find(
+    (page) => Number(page.original_page_number) === Number(pageNumber),
+  );
+  if (!pageEntry) {
+    return;
+  }
+  const label = asText(pageEntry.original_page_number);
+  activePageLabel.textContent = pageEntry.pdf_page_label
+    ? `Physical page ${label} · ${pageEntry.pdf_page_label}`
+    : `Physical page ${label}`;
+  showSourcePage(pageEntry);
+  if (persist) {
+    persistReviewPosition(Number(pageEntry.original_page_number));
+  }
+}
+
 function provenanceLabel(block) {
   const revision = Math.max(0, Number(block.base_revision) || 0);
   const reconstructedTable = block.segment_handling === "table_reconstruction";
@@ -1423,6 +1469,7 @@ function updateBlockStatus(blockElement, block) {
 
 function makeTranslationBlock(block, page, draftText) {
   const article = createElement("article", "translation-block");
+  article.classList.add("page-sync-anchor");
   article.dataset.blockId = asText(block.block_id);
   article.dataset.pageNumber = asText(page.original_page_number);
   article.dataset.baseRevision = asText(block.base_revision, "0");
@@ -1586,6 +1633,8 @@ function makeTranslationBlock(block, page, draftText) {
   }
 
   const editor = createElement("div", "translated-editor");
+  editor.dataset.blockId = asText(block.block_id);
+  editor.dataset.pageNumber = asText(page.original_page_number);
   editor.dataset.testid = "translated-block";
   editor.contentEditable = "true";
   editor.spellcheck = true;
@@ -1678,12 +1727,177 @@ function makeTranslationBlock(block, page, draftText) {
   return article;
 }
 
+function paragraphGroupEntries(group) {
+  return group.fragment_block_ids
+    .map((blockId) => state.blockIndex.get(asText(blockId)))
+    .filter(Boolean);
+}
+
+function paragraphReviewStatus(entries) {
+  const statuses = entries.map(({ block }) => asText(block.review_status, "unreviewed"));
+  if (statuses.every((status) => status === "accepted")) {
+    return "accepted";
+  }
+  if (statuses.some((status) => status === "needs_work")) {
+    return "needs_work";
+  }
+  return statuses.some((status) => status !== "unreviewed") ? "in_review" : "unreviewed";
+}
+
+function makeParagraphGroup(group) {
+  const entries = paragraphGroupEntries(group);
+  const firstEntry = entries[0];
+  const article = createElement(
+    "article",
+    "translation-block paragraph-group page-sync-anchor",
+  );
+  article.dataset.blockId = asText(group.paragraph_id);
+  article.dataset.paragraphId = asText(group.paragraph_id);
+  article.dataset.pageNumber = asText(firstEntry?.page.original_page_number, "1");
+
+  const meta = createElement("div", "block-meta");
+  meta.append(
+    createElement("span", "", "Body"),
+    createElement(
+      "span",
+      "paragraph-continuation",
+      `Combined paragraph · physical pages ${entries
+        .map(({ page }) => page.original_page_number)
+        .join("–")}`,
+    ),
+  );
+  const revisedCount = entries.filter(({ block }) => Number(block.base_revision) > 0).length;
+  meta.append(
+    createElement(
+      "span",
+      revisedCount ? "provenance edited" : "provenance machine",
+      revisedCount
+        ? `${revisedCount} ${revisedCount === 1 ? "fragment" : "fragments"} manually reviewed`
+        : "Machine translation",
+    ),
+  );
+  if (entries.some(({ block }) => block.classification_review_required === true)) {
+    meta.append(createElement("span", "classification-warning", "Check continuation seam"));
+  }
+  const groupStatus = paragraphReviewStatus(entries);
+  meta.append(
+    createElement(
+      "span",
+      `status ${reviewStatusClass(groupStatus)}`.trim(),
+      humanize(groupStatus),
+    ),
+  );
+
+  const flow = createElement("div", "merged-paragraph-editor");
+  flow.dataset.testid = "merged-paragraph-editor";
+  flow.setAttribute("role", "group");
+  flow.setAttribute(
+    "aria-label",
+    `Combined paragraph across ${entries.length} physical pages`,
+  );
+  const fallbackContainer = createElement("div", "uncertainty-fallbacks");
+  for (const [index, entry] of entries.entries()) {
+    const { block, page } = entry;
+    if (index > 0) {
+      flow.append(document.createTextNode(" "));
+      const boundary = createElement(
+        "button",
+        "paragraph-page-boundary page-sync-anchor",
+        `Physical page ${page.original_page_number}`,
+      );
+      boundary.type = "button";
+      boundary.contentEditable = "false";
+      boundary.dataset.action = "show-paragraph-page";
+      boundary.dataset.pageNumber = asText(page.original_page_number);
+      boundary.setAttribute(
+        "aria-label",
+        `Paragraph continues on physical page ${page.original_page_number}; show that page image`,
+      );
+      flow.append(boundary, document.createTextNode(" "));
+    }
+
+    const editor = createElement("span", "translated-editor paragraph-fragment-editor");
+    editor.dataset.testid = "translated-block";
+    editor.dataset.blockId = asText(block.block_id);
+    editor.dataset.pageNumber = asText(page.original_page_number);
+    editor.dataset.baseRevision = asText(block.base_revision, "0");
+    editor.contentEditable = "true";
+    editor.tabIndex = 0;
+    editor.spellcheck = true;
+    editor.setAttribute("role", "textbox");
+    editor.setAttribute(
+      "aria-label",
+      `Paragraph fragment from physical page ${page.original_page_number}`,
+    );
+    const effectiveText = asText(block.effective_text, asText(block.machine_text));
+    const draftText = state.reviewDrafts.get(asText(block.block_id));
+    const displayedText = draftText === undefined ? effectiveText : draftText;
+    const handled = renderHighlightedText(editor, displayedText, block);
+    if (displayedText !== effectiveText) {
+      editor.classList.add("is-dirty");
+      article.classList.add("is-dirty");
+    }
+    flow.append(editor);
+
+    for (const uncertainty of unresolvedUncertainties(block)) {
+      const uncertaintyId = asText(uncertainty.uncertainty_id);
+      if (handled.has(uncertaintyId)) {
+        continue;
+      }
+      const fallback = createElement(
+        "button",
+        "uncertainty-fallback",
+        `Review page ${page.original_page_number}: ${asText(
+          uncertainty.source_term,
+          "uncertain passage",
+        )}`,
+      );
+      fallback.type = "button";
+      fallback.dataset.testid = "uncertainty-highlight";
+      fallback.dataset.action = "review-uncertainty";
+      fallback.dataset.uncertaintyId = uncertaintyId;
+      fallbackContainer.append(fallback);
+    }
+  }
+
+  const help = createElement(
+    "p",
+    "paragraph-group-help",
+    "Edit each page fragment at the fixed page marker; Save or Validate applies to the whole paragraph.",
+  );
+  const actions = createElement("div", "block-actions");
+  const save = createElement("button", "block-action save-action", "Save paragraph");
+  save.type = "button";
+  save.dataset.testid = "save-paragraph";
+  save.dataset.action = "save-paragraph";
+  save.dataset.reviewStatus = "in_review";
+  const validate = createElement(
+    "button",
+    "block-action validate-action",
+    "Validate paragraph",
+  );
+  validate.type = "button";
+  validate.dataset.testid = "validate-paragraph";
+  validate.dataset.action = "save-paragraph";
+  validate.dataset.reviewStatus = "accepted";
+  const message = createElement("span", "block-message");
+  message.setAttribute("role", "status");
+  message.setAttribute("aria-live", "polite");
+  actions.append(save, validate, message);
+
+  article.append(meta, flow, help);
+  if (fallbackContainer.childElementCount) {
+    article.append(fallbackContainer);
+  }
+  article.append(actions);
+  return article;
+}
+
 function captureDrafts() {
-  for (const blockElement of translationContent.querySelectorAll(".translation-block")) {
-    const editor = blockElement.querySelector(".translated-editor");
-    const blockId = asText(blockElement.dataset.blockId);
+  for (const editor of translationContent.querySelectorAll(".translated-editor")) {
+    const blockId = asText(editor.dataset.blockId);
     const entry = state.blockIndex.get(blockId);
-    if (!editor || !entry) {
+    if (!entry) {
       continue;
     }
     const editorialText = editorPlainText(editor);
@@ -1701,6 +1915,8 @@ function buildReviewIndexes(pages) {
   state.uncertaintyIndex = new Map();
   state.uncertaintyGroups = [];
   state.footnoteEntrypointsByOwner = new Map();
+  state.paragraphGroups = [];
+  state.paragraphGroupByFragment = new Map();
   for (const page of pages) {
     for (const block of Array.isArray(page.blocks) ? page.blocks : []) {
       block.base_revision = Math.max(0, Number(block.base_revision) || 0);
@@ -1743,6 +1959,32 @@ function buildReviewIndexes(pages) {
   }
   for (const entrypoints of state.footnoteEntrypointsByOwner.values()) {
     entrypoints.sort((left, right) => left.offset - right.offset);
+  }
+  const paragraphGroups = Array.isArray(state.review?.paragraph_groups)
+    ? state.review.paragraph_groups
+    : [];
+  for (const group of paragraphGroups) {
+    const fragmentIds = Array.isArray(group.fragment_block_ids)
+      ? group.fragment_block_ids.map((value) => asText(value))
+      : [];
+    if (
+      fragmentIds.length < 2 ||
+      fragmentIds[0] !== asText(group.paragraph_id) ||
+      fragmentIds.some((blockId) => !state.blockIndex.has(blockId))
+    ) {
+      continue;
+    }
+    const normalized = {
+      paragraph_id: asText(group.paragraph_id),
+      fragment_block_ids: fragmentIds,
+      original_page_numbers: Array.isArray(group.original_page_numbers)
+        ? group.original_page_numbers.map(Number)
+        : [],
+    };
+    state.paragraphGroups.push(normalized);
+    for (const blockId of fragmentIds) {
+      state.paragraphGroupByFragment.set(blockId, normalized);
+    }
   }
 }
 
@@ -1813,15 +2055,17 @@ function handleUncertaintyGroupClick(event) {
     return;
   }
   uncertaintyListDialog.close();
-  const blockElement = [...translationContent.querySelectorAll(".translation-block")].find(
+  const matchingEditor = [...translationContent.querySelectorAll(".translated-editor")].find(
     (element) => element.dataset.blockId === asText(entry.block.block_id),
   );
+  const blockElement = matchingEditor?.closest(".translation-block");
   if (blockElement) {
     translationScroll.scrollTop = Math.max(
       0,
       elementPositionInScroller(blockElement, translationScroll) - 72,
     );
     syncSourceToTranslation();
+    activateSourcePageNumber(Number(entry.page.original_page_number));
   }
   requestAnimationFrame(() => openUncertainty(uncertaintyId));
 }
@@ -1885,6 +2129,13 @@ function renderAllReviewPages(options = {}) {
     translatedPage.append(makePageLabel(page));
 
     for (const block of Array.isArray(page.blocks) ? page.blocks : []) {
+      const paragraphGroup = state.paragraphGroupByFragment.get(asText(block.block_id));
+      if (paragraphGroup) {
+        if (asText(block.block_id) === asText(paragraphGroup.paragraph_id)) {
+          translatedPage.append(makeParagraphGroup(paragraphGroup));
+        }
+        continue;
+      }
       translatedPage.append(
         makeTranslationBlock(
           block,
@@ -1921,10 +2172,10 @@ function renderAllReviewPages(options = {}) {
     }
     syncSourceToTranslation();
     if (options.focusBlockId) {
-      const block = [...translationContent.querySelectorAll(".translation-block")].find(
+      const editor = [...translationContent.querySelectorAll(".translated-editor")].find(
         (element) => element.dataset.blockId === asText(options.focusBlockId),
       );
-      block?.querySelector(".translated-editor")?.focus({ preventScroll: true });
+      editor?.focus({ preventScroll: true });
     }
     requestAnimationFrame(() => {
       state.allowPositionPersistence = true;
@@ -2084,6 +2335,93 @@ async function saveBlock(block, blockElement, editor, status, buttons, message) 
         message.textContent = "";
       }
     }, 2400);
+  } catch (error) {
+    message.textContent = error.message;
+    showGlobalError(error.message);
+  } finally {
+    for (const button of buttons) {
+      button.disabled = false;
+    }
+    blockElement.classList.remove("is-saving");
+  }
+}
+
+async function saveParagraphGroup(paragraph, blockElement, status, buttons, message) {
+  const editorsByBlockId = new Map(
+    [...blockElement.querySelectorAll(".paragraph-fragment-editor")].map((editor) => [
+      asText(editor.dataset.blockId),
+      editor,
+    ]),
+  );
+  const fragments = [];
+  for (const blockId of paragraph.fragment_block_ids) {
+    const entry = state.blockIndex.get(asText(blockId));
+    const editor = editorsByBlockId.get(asText(blockId));
+    if (!entry || !editor) {
+      showGlobalError("The combined paragraph no longer matches the review data. Refresh it.");
+      return;
+    }
+    const editorialText = editorPlainText(editor).trim();
+    if (!editorialText) {
+      editor.setAttribute("aria-invalid", "true");
+      message.textContent = "Paragraph fragments cannot be blank.";
+      editor.focus();
+      return;
+    }
+    fragments.push({
+      block_id: blockId,
+      editorial_text: editorialText,
+      expected_base_revision: Number(entry.block.base_revision) || 0,
+    });
+  }
+
+  for (const button of buttons) {
+    button.disabled = true;
+  }
+  blockElement.classList.add("is-saving");
+  message.textContent = status === "accepted" ? "Validating paragraph…" : "Saving paragraph…";
+  const drafts = new Map(captureDrafts());
+  for (const blockId of paragraph.fragment_block_ids) {
+    drafts.delete(asText(blockId));
+  }
+  const pageNumber = Number(blockElement.dataset.pageNumber);
+  const anchorPage = renderedPageElement(translationContent, pageNumber);
+  const anchorViewportOffset = anchorPage
+    ? anchorPage.getBoundingClientRect().top -
+      translationScroll.getBoundingClientRect().top
+    : null;
+  try {
+    const response = await apiRequest(
+      `/api/jobs/${encodeURIComponent(state.jobId)}/paragraph-revisions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          paragraph_id: paragraph.paragraph_id,
+          fragments,
+          status,
+        }),
+      },
+    );
+    if (!Array.isArray(response?.pages)) {
+      throw new Error("The server did not return the updated paragraph review.");
+    }
+    state.review = response;
+    renderReview(drafts, {
+      centerPageNumber: pageNumber,
+      anchorPageNumber: pageNumber,
+      anchorViewportOffset,
+      focusBlockId: paragraph.paragraph_id,
+    });
+    requestAnimationFrame(() => {
+      const refreshed = translationContent.querySelector(
+        `.paragraph-group[data-paragraph-id="${CSS.escape(asText(paragraph.paragraph_id))}"]`,
+      );
+      const refreshedMessage = refreshed?.querySelector(".block-message");
+      if (refreshedMessage) {
+        refreshedMessage.textContent = status === "accepted" ? "Paragraph validated" : "Paragraph saved";
+      }
+    });
   } catch (error) {
     message.textContent = error.message;
     showGlobalError(error.message);
@@ -2470,32 +2808,23 @@ function persistReviewPosition(pageNumber) {
 
 function syncSourceToTranslation() {
   state.scrollFrame = null;
-  const translatedPages = [...translationContent.querySelectorAll(".review-page")];
-  if (!translatedPages.length) {
+  const pageAnchors = [
+    ...translationContent.querySelectorAll(".page-sync-anchor[data-page-number]"),
+  ];
+  if (!pageAnchors.length) {
     return;
   }
   const scrollTop = translationScroll.scrollTop;
   const anchor = scrollTop + 76;
-  let activePage = translatedPages[0];
-  for (const page of translatedPages) {
-    if (elementPositionInScroller(page, translationScroll) <= anchor) {
-      activePage = page;
+  let activePageAnchor = pageAnchors[0];
+  for (const pageAnchor of pageAnchors) {
+    if (elementPositionInScroller(pageAnchor, translationScroll) <= anchor) {
+      activePageAnchor = pageAnchor;
     } else {
       break;
     }
   }
-
-  const pageNumber = asText(activePage.dataset.pageNumber);
-  const pageEntry = state.review?.pages?.find(
-    (page) => asText(page.original_page_number) === pageNumber,
-  );
-  activePageLabel.textContent = pageEntry
-    ? `Physical page ${pageNumber}${pageEntry.pdf_page_label ? ` · ${pageEntry.pdf_page_label}` : ""}`
-    : `Physical page ${pageNumber}`;
-  if (pageEntry) {
-    showSourcePage(pageEntry);
-  }
-  persistReviewPosition(Number(pageNumber));
+  activateSourcePageNumber(Number(activePageAnchor.dataset.pageNumber));
 }
 
 function requestScrollSync() {
@@ -2618,6 +2947,8 @@ function resetForNewTranslation() {
   state.uncertaintyIndex = new Map();
   state.uncertaintyGroups = [];
   state.reviewPages = [];
+  state.paragraphGroups = [];
+  state.paragraphGroupByFragment = new Map();
   state.reviewDrafts = new Map();
   state.sourcePageNumber = null;
   state.allowPositionPersistence = false;

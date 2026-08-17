@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from itertools import pairwise
 from typing import Literal, Self
 
 from pydantic import Field, model_validator
@@ -261,6 +262,28 @@ class ReviewPage(ContractModel):
         return self
 
 
+class ReviewParagraphGroup(ContractModel):
+    """Derived cross-page paragraph identity with fragment-scoped provenance."""
+
+    paragraph_id: BlockId
+    fragment_block_ids: list[BlockId] = Field(min_length=2)
+    original_page_numbers: list[int] = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def fragments_must_be_ordered_and_unique(self) -> Self:
+        if self.fragment_block_ids[0] != self.paragraph_id:
+            raise ValueError("paragraph_id must identify the first fragment")
+        if len(self.fragment_block_ids) != len(set(self.fragment_block_ids)):
+            raise ValueError("paragraph fragment IDs must be unique")
+        if len(self.fragment_block_ids) != len(self.original_page_numbers):
+            raise ValueError("paragraph fragments and page numbers must have equal length")
+        first_page = self.original_page_numbers[0]
+        expected_pages = list(range(first_page, first_page + len(self.original_page_numbers)))
+        if self.original_page_numbers != expected_pages:
+            raise ValueError("paragraph fragments must occupy consecutive physical pages")
+        return self
+
+
 class ReviewDocument(ContractModel):
     """Strict effective view consumed by the local review interface."""
 
@@ -269,6 +292,7 @@ class ReviewDocument(ContractModel):
     source_file_name: NonEmptyText
     page_count: int = Field(ge=1)
     pages: list[ReviewPage] = Field(min_length=1)
+    paragraph_groups: list[ReviewParagraphGroup] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def pages_must_be_complete_and_ordered(self) -> Self:
@@ -284,4 +308,27 @@ class ReviewDocument(ContractModel):
             raise ValueError("every review block must belong to its containing document")
         if any(block.translation_run_id != self.translation_run_id for block in blocks):
             raise ValueError("every review block must belong to its containing translation run")
+        blocks_by_id = {block.block_id: block for block in blocks}
+        grouped_ids: set[str] = set()
+        paragraph_ids: set[str] = set()
+        for group in self.paragraph_groups:
+            if group.paragraph_id in paragraph_ids:
+                raise ValueError("review paragraph IDs must be unique")
+            paragraph_ids.add(group.paragraph_id)
+            if grouped_ids.intersection(group.fragment_block_ids):
+                raise ValueError("a review block may belong to only one paragraph group")
+            grouped_ids.update(group.fragment_block_ids)
+            fragments = [blocks_by_id.get(block_id) for block_id in group.fragment_block_ids]
+            if any(fragment is None for fragment in fragments):
+                raise ValueError("review paragraph groups must reference known blocks")
+            typed_fragments = [fragment for fragment in fragments if fragment is not None]
+            if any(fragment.type is not BlockType.BODY for fragment in typed_fragments):
+                raise ValueError("review paragraph groups may contain only body blocks")
+            if [fragment.original_page_number for fragment in typed_fragments] != (
+                group.original_page_numbers
+            ):
+                raise ValueError("review paragraph page numbers must match their blocks")
+            for previous, current in pairwise(typed_fragments):
+                if current.continues_from_block_id != previous.block_id:
+                    raise ValueError("review paragraph fragments must follow trusted links")
         return self

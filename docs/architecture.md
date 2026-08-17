@@ -172,7 +172,7 @@ Never overload the phrase “page number”:
 
 Every request contains exactly one current-page PNG, that page's complete
 Markdown, and the fully resolved translation settings. The primary pass uses
-`translate-page-v8`. When that pass tags at least one table or table-like region,
+`translate-page-v9`. When that pass tags at least one table or table-like region,
 the pipeline immediately makes one additional batched request for that page using
 `reconstruct-tables-v1`; it sends the same PNG and complete page MarkItDown/OCR,
 plus the first-pass segmentation and exact table targets. Multiple table regions
@@ -217,9 +217,14 @@ body can continue from a prior page and only the last main-flow body can remain
 unfinished at the next boundary.
 
 Canonical fragments remain page-local, independently checkpointed, and separately
-revisable. The compiler follows the trusted link and emits both fragments as one
-Markdown paragraph. With page comments enabled, the new physical-page marker is
-inline at the join and names the linked prior block. The current page can confirm
+revisable. The prompt requires the current fragment to form a seamless grammatical
+join without repeating prior content. A derived paragraph projection follows the
+trusted links across effective body blocks. Review renders that projection as one
+paragraph with immutable inline physical-page boundaries; one group command
+preflights every fragment and then appends one ordinary revision per fragment.
+Markdown, plain-text, and LaTeX exporters consume the same projection. LaTeX emits
+exactly one final `\par`; with page comments enabled, each new physical-page marker
+is inline at the join and names the linked prior block. The current page can confirm
 continuity but cannot retroactively revise the already persisted prior fragment.
 Because prior finalized output is embedded in the exact prompt, context content
 and window size participate in checkpoint identity while page artifacts remain
@@ -493,8 +498,9 @@ The browser interface is intentionally operational rather than promotional:
   mapping controls use stable container-level delegated handlers rather than one
   listener per element. Each block distinguishes immutable machine translation
   from the latest append-only manual revision. Editing and validation append
-  revisions. Linked paragraph fragments display their continuation state without
-  merging their editors or revision histories. Structured uncertainties are
+  revisions. Linked paragraph fragments form one visual editor and one validation
+  action, separated by immutable page markers; persistence and uncertainty offsets
+  remain fragment-scoped. Structured uncertainties are
   highlighted and expose one/all replacement according to the service contract.
   The **Uncertain terms** control opens all unresolved groups in descending
   occurrence order and jumps to the first marked instance. Reviewers can change a

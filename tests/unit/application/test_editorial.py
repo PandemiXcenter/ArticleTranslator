@@ -3,13 +3,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 
 from article_translator.application.editorial import EditorialService
-from article_translator.domain.editorial import BlockRevision, ReviewPosition
+from article_translator.domain.editorial import BlockRevision, ReviewDocument, ReviewPosition
 from article_translator.domain.enums import (
     BlockType,
     ExtractionStatus,
     ManualInsertionReason,
+    ReviewStatus,
     SegmentContinuation,
     SegmentHandling,
 )
@@ -168,6 +170,36 @@ def _document(*blocks: TranslatedBlock) -> DocumentTranslation:
     return DocumentTranslation.model_validate(document_fields)
 
 
+def _continued_document() -> DocumentTranslation:
+    first = _block("p0001-b0001", 1, "første del", "The paragraph begins").model_copy(
+        update={"paragraph_continuation": SegmentContinuation.TO_NEXT_PAGE}
+    )
+    second = TranslatedBlock(
+        block_id="p0002-b0001",
+        original_page_number=2,
+        order=1,
+        type=BlockType.BODY,
+        source_text="anden del",
+        translated_text="and ends on page two.",
+        paragraph_continuation=SegmentContinuation.FROM_PREVIOUS_PAGE,
+        continues_from_block_id=first.block_id,
+    )
+    document = _document(first)
+    second_page = PageTranslation.model_validate(
+        {
+            **document.pages[0].model_dump(mode="python"),
+            "original_page_number": 2,
+            "source_markdown_artifact": _artifact(
+                "prepared/page-two.md",
+                "text/markdown",
+            ),
+            "source_image": _artifact("prepared/page-two.png", "image/png"),
+            "blocks": [second],
+        }
+    )
+    return document.model_copy(update={"page_count": 2, "pages": [document.pages[0], second_page]})
+
+
 def test_review_projection_keeps_source_machine_text_and_physical_page() -> None:
     document = _document(
         _block(
@@ -193,6 +225,84 @@ def test_review_projection_keeps_source_machine_text_and_physical_page() -> None
         "p0001-b0001-u0001-o0002",
     ]
     assert all(item.can_replace_all for item in block.uncertainty_highlights)
+
+
+def test_review_projects_and_revises_cross_page_paragraph_as_one_group() -> None:
+    document = _continued_document()
+    repository = MemoryRevisionRepository()
+    service = EditorialService(repository)
+
+    initial = service.review_document(document, RUN_ID)
+
+    assert len(initial.paragraph_groups) == 1
+    paragraph = initial.paragraph_groups[0]
+    assert paragraph.paragraph_id == "p0001-b0001"
+    assert paragraph.fragment_block_ids == ["p0001-b0001", "p0002-b0001"]
+    assert paragraph.original_page_numbers == [1, 2]
+
+    revisions = service.revise_paragraph(
+        document,
+        RUN_ID,
+        paragraph.paragraph_id,
+        [
+            ("p0001-b0001", "The paragraph now begins", 0),
+            ("p0002-b0001", "and now ends seamlessly.", 0),
+        ],
+        status=ReviewStatus.ACCEPTED,
+    )
+    reviewed = service.review_document(document, RUN_ID)
+
+    assert [revision.block_id for revision in revisions] == [
+        "p0001-b0001",
+        "p0002-b0001",
+    ]
+    assert [
+        block.effective_translated_text for page in reviewed.pages for block in page.blocks
+    ] == [
+        "The paragraph now begins",
+        "and now ends seamlessly.",
+    ]
+    assert all(
+        block.review_status is ReviewStatus.ACCEPTED
+        for page in reviewed.pages
+        for block in page.blocks
+    )
+    assert document.pages[0].blocks[0].translated_text == "The paragraph begins"
+
+
+def test_paragraph_revision_preflights_every_fragment_before_writing() -> None:
+    document = _continued_document()
+    repository = MemoryRevisionRepository()
+    service = EditorialService(repository)
+
+    with pytest.raises(RevisionConflictError):
+        service.revise_paragraph(
+            document,
+            RUN_ID,
+            "p0001-b0001",
+            [
+                ("p0001-b0001", "Edited first", 0),
+                ("p0002-b0001", "Edited second", 1),
+            ],
+            status=ReviewStatus.ACCEPTED,
+        )
+
+    assert repository.revisions == {}
+
+
+def test_review_paragraph_group_rejects_reordered_fragment_identity() -> None:
+    review = EditorialService(MemoryRevisionRepository()).review_document(
+        _continued_document(),
+        RUN_ID,
+    )
+    payload = review.model_dump(mode="python")
+    payload["paragraph_groups"][0]["fragment_block_ids"] = [
+        "p0002-b0001",
+        "p0001-b0001",
+    ]
+
+    with pytest.raises(ValidationError, match="paragraph_id must identify the first fragment"):
+        ReviewDocument.model_validate(payload)
 
 
 def test_review_position_is_run_scoped_and_validated_against_physical_pages() -> None:
