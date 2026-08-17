@@ -21,9 +21,19 @@ class JobTranslationSettings(ApiModel):
     target_language: NonEmptyText = Field(max_length=100)
     style: TranslationStyle
     footnote_appearance_instructions: str | None = Field(default=None, max_length=4_000)
+    uncertainty_level: Literal["off", "low", "standard", "high"] | None = None
+    uncertainty_instructions: str | None = Field(default=None, max_length=4_000)
     previous_page_context_count: int = Field(ge=0, le=10)
     image_dpi: int = Field(ge=72, le=600)
     auto_continue: bool
+
+    @field_validator("footnote_appearance_instructions", "uncertainty_instructions")
+    @classmethod
+    def normalize_optional_instructions(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
 
 
 class ApiKeySettingsRequest(ApiModel):

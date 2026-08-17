@@ -56,6 +56,14 @@ class TranslationStyle(StrEnum):
     READABLE = "readable"
 
 
+class UncertaintyLevel(StrEnum):
+    """How broadly the provider should identify terms for reviewer attention."""
+
+    LOW = "low"
+    STANDARD = "standard"
+    HIGH = "high"
+
+
 class ExtractionStatus(StrEnum):
     EXTRACTED = "extracted"
     EMPTY = "empty"

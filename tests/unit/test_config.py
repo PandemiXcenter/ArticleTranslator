@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from article_translator.config import SecretSettings, load_project_config
-from article_translator.domain.enums import TranslationStyle
+from article_translator.domain.enums import TranslationStyle, UncertaintyLevel
 from article_translator.domain.errors import ConfigurationError
 
 
@@ -24,6 +24,9 @@ def test_default_toml_is_the_complete_non_secret_configuration() -> None:
     assert config.translation.target_language == "English"
     assert config.translation.previous_page_context_count == 2
     assert config.translation.footnote_appearance_instructions is None
+    assert config.translation.mark_uncertain_terms is True
+    assert config.translation.uncertainty_level is UncertaintyLevel.STANDARD
+    assert config.translation.uncertainty_instructions is None
     assert config.extraction.image_dpi == 150
     assert config.export.include_page_comments is True
     assert config.pdf_export.latex_engine == "xelatex"
@@ -35,6 +38,7 @@ def test_default_toml_is_the_complete_non_secret_configuration() -> None:
     assert config.web.auto_continue_default is False
     assert config.web.auto_continue_attempts == 1
     assert config.web.max_instruction_characters == 4_000
+    assert config.web.uncertainty_level_choices == ["off", "low", "standard", "high"]
     assert config.web.review_zoom_levels == [100, 125, 150, 175, 200]
     assert config.web.review_zoom_default_percent == 100
 
@@ -56,6 +60,83 @@ def test_footnote_appearance_config_is_required_and_bounded(tmp_path: Path) -> N
         load_project_config(missing)
     with pytest.raises(ConfigurationError, match="less than or equal to 4000"):
         load_project_config(invalid_limit)
+
+
+def test_uncertainty_policy_config_is_required_and_strict(tmp_path: Path) -> None:
+    source = Path("config/default.toml").read_text(encoding="utf-8")
+    missing_level = tmp_path / "missing-uncertainty-level.toml"
+    missing_level.write_text(
+        source.replace('uncertainty_level = "standard"\n', ""),
+        encoding="utf-8",
+    )
+    missing_instructions = tmp_path / "missing-uncertainty-instructions.toml"
+    missing_instructions.write_text(
+        source.replace('uncertainty_instructions = ""\n', ""),
+        encoding="utf-8",
+    )
+    invalid_level = tmp_path / "invalid-uncertainty-level.toml"
+    invalid_level.write_text(
+        source.replace('uncertainty_level = "standard"', 'uncertainty_level = "exhaustive"'),
+        encoding="utf-8",
+    )
+    missing_choices = tmp_path / "missing-uncertainty-choices.toml"
+    missing_choices.write_text(
+        source.replace(
+            'uncertainty_level_choices = ["off", "low", "standard", "high"]\n',
+            "",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="uncertainty_level"):
+        load_project_config(missing_level)
+    with pytest.raises(ConfigurationError, match="uncertainty_instructions"):
+        load_project_config(missing_instructions)
+    with pytest.raises(ConfigurationError, match="Input should be 'low', 'standard' or 'high'"):
+        load_project_config(invalid_level)
+    with pytest.raises(ConfigurationError, match="uncertainty_level_choices"):
+        load_project_config(missing_choices)
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [
+        ("uncertainty_level_choices = []", "must not be empty"),
+        (
+            'uncertainty_level_choices = ["off", "standard", "standard"]',
+            "must be unique",
+        ),
+        (
+            'uncertainty_level_choices = ["low", "standard", "high"]',
+            "must include off",
+        ),
+        (
+            'uncertainty_level_choices = ["off", "low", "high"]',
+            "configured uncertainty default must appear",
+        ),
+        (
+            'uncertainty_level_choices = ["off", "low", "standard", "exhaustive"]',
+            "Input should be 'off', 'low', 'standard' or 'high'",
+        ),
+    ],
+)
+def test_uncertainty_level_choices_are_strict(
+    tmp_path: Path,
+    replacement: str,
+    message: str,
+) -> None:
+    source = Path("config/default.toml").read_text(encoding="utf-8")
+    path = tmp_path / "invalid-uncertainty-choices.toml"
+    path.write_text(
+        source.replace(
+            'uncertainty_level_choices = ["off", "low", "standard", "high"]',
+            replacement,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match=message):
+        load_project_config(path)
 
 
 def test_unknown_config_keys_fail_fast(tmp_path: Path) -> None:

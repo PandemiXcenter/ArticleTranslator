@@ -5,7 +5,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from article_translator.domain.enums import TranslationStyle
+from article_translator.domain.enums import TranslationStyle, UncertaintyLevel
 from article_translator.domain.errors import ConfigurationError
 from article_translator.domain.models import (
     MarkdownExportSettings,
@@ -74,6 +74,7 @@ class WebConfig(ConfigModel):
     max_glossary_entries: int = Field(ge=0, le=10_000)
     max_term_characters: int = Field(ge=1, le=4_000)
     max_instruction_characters: int = Field(ge=1, le=4_000)
+    uncertainty_level_choices: list[Literal["off", "low", "standard", "high"]]
     status_poll_interval_ms: int = Field(ge=250, le=30_000)
     review_zoom_levels: list[int]
     review_zoom_default_percent: int = Field(ge=50, le=400)
@@ -81,7 +82,13 @@ class WebConfig(ConfigModel):
     auto_continue_attempts: int = Field(ge=1, le=10)
 
     @model_validator(mode="after")
-    def review_zoom_is_selectable_and_bounded(self) -> Self:
+    def web_choices_are_selectable_and_bounded(self) -> Self:
+        if not self.uncertainty_level_choices:
+            raise ValueError("uncertainty_level_choices must not be empty")
+        if len(self.uncertainty_level_choices) != len(set(self.uncertainty_level_choices)):
+            raise ValueError("uncertainty_level_choices must be unique")
+        if "off" not in self.uncertainty_level_choices:
+            raise ValueError("uncertainty_level_choices must include off")
         if not self.review_zoom_levels:
             raise ValueError("review_zoom_levels must not be empty")
         if len(self.review_zoom_levels) != len(set(self.review_zoom_levels)):
@@ -107,6 +114,8 @@ class ConfiguredTranslationSettings(TranslationSettings):
     preserve_names: bool
     preserve_citations: bool
     mark_uncertain_terms: bool
+    uncertainty_level: UncertaintyLevel
+    uncertainty_instructions: str | None
     previous_page_context_count: int = Field(ge=0, le=10)
 
 
@@ -137,6 +146,19 @@ class ProjectConfig(ConfigModel):
     export: ConfiguredMarkdownExportSettings
     pdf_export: PdfExportConfig
     web: WebConfig
+
+    @model_validator(mode="after")
+    def default_uncertainty_level_must_be_selectable(self) -> Self:
+        default_choice = (
+            self.translation.uncertainty_level.value
+            if self.translation.mark_uncertain_terms
+            else "off"
+        )
+        if default_choice not in self.web.uncertainty_level_choices:
+            raise ValueError(
+                "the configured uncertainty default must appear in uncertainty_level_choices"
+            )
+        return self
 
 
 def load_project_config(path: Path) -> ProjectConfig:

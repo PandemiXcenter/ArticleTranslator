@@ -10,6 +10,7 @@ from article_translator.domain.enums import (
     ManualInsertionReason,
     SegmentContinuation,
     SegmentHandling,
+    UncertaintyLevel,
 )
 from article_translator.domain.models import (
     ArtifactRef,
@@ -80,6 +81,30 @@ def test_translation_settings_normalize_footnote_appearance_instructions() -> No
 
     with pytest.raises(ValidationError, match="at most 4000"):
         TranslationSettings(footnote_appearance_instructions="x" * 4_001)
+
+
+def test_translation_settings_validate_uncertainty_policy_and_preserve_legacy_flag() -> None:
+    default = TranslationSettings()
+    assert default.mark_uncertain_terms is True
+    assert default.uncertainty_level is UncertaintyLevel.STANDARD
+    assert default.uncertainty_instructions is None
+
+    settings = TranslationSettings(
+        uncertainty_level=UncertaintyLevel.HIGH,
+        uncertainty_instructions="  Mark all numbers and medical terms.  ",
+    )
+    assert settings.uncertainty_instructions == "Mark all numbers and medical terms."
+    assert TranslationSettings.model_validate_json(settings.model_dump_json()) == settings
+    assert TranslationSettings(uncertainty_instructions="   ").uncertainty_instructions is None
+
+    legacy_disabled = TranslationSettings(mark_uncertain_terms=False)
+    assert legacy_disabled.mark_uncertain_terms is False
+    assert legacy_disabled.uncertainty_level is UncertaintyLevel.STANDARD
+
+    with pytest.raises(ValidationError, match="Input should be 'low', 'standard' or 'high'"):
+        TranslationSettings.model_validate({"uncertainty_level": "exhaustive"})
+    with pytest.raises(ValidationError, match="at most 4000"):
+        TranslationSettings(uncertainty_instructions="x" * 4_001)
 
 
 def test_generated_payload_requires_contiguous_reading_order() -> None:

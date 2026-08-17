@@ -9,6 +9,7 @@ from article_translator.domain.enums import (
     SegmentContinuation,
     SegmentHandling,
     TranslationStyle,
+    UncertaintyLevel,
 )
 from article_translator.domain.models import (
     DocumentTranslation,
@@ -54,4 +55,5 @@ __all__ = [
     "TranslatedBlock",
     "TranslationSettings",
     "TranslationStyle",
+    "UncertaintyLevel",
 ]

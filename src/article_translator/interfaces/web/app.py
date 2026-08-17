@@ -33,6 +33,7 @@ from article_translator.domain.editorial import (
     UncertaintyFallback,
     UncertaintyHighlight,
 )
+from article_translator.domain.enums import UncertaintyLevel
 from article_translator.domain.errors import (
     ArtifactError,
     EditorialError,
@@ -153,6 +154,9 @@ def create_app(
             "review": {
                 "zoom_levels": config.web.review_zoom_levels,
                 "zoom_default_percent": config.web.review_zoom_default_percent,
+            },
+            "uncertainty": {
+                "level_choices": config.web.uncertainty_level_choices,
             },
             "api_key_configured": (
                 _environment_api_key_configured() or local_secret_store.has_gemini_api_key()
@@ -544,6 +548,12 @@ def _parse_job_settings(
             target_language=config.translation.target_language,
             style=config.translation.style,
             footnote_appearance_instructions=(config.translation.footnote_appearance_instructions),
+            uncertainty_level=(
+                config.translation.uncertainty_level.value
+                if config.translation.mark_uncertain_terms
+                else "off"
+            ),
+            uncertainty_instructions=config.translation.uncertainty_instructions,
             previous_page_context_count=config.translation.previous_page_context_count,
             image_dpi=config.extraction.image_dpi,
             auto_continue=config.web.auto_continue_default,
@@ -569,6 +579,21 @@ def _parse_job_settings(
             status_code=422,
             detail="Footnote appearance guidance exceeds the configured character limit",
         )
+    selected_uncertainty_level = requested.uncertainty_level or (
+        config.translation.uncertainty_level.value
+        if config.translation.mark_uncertain_terms
+        else "off"
+    )
+    if selected_uncertainty_level not in config.web.uncertainty_level_choices:
+        raise HTTPException(
+            status_code=422,
+            detail="Select an uncertainty level allowed by the project configuration",
+        )
+    if len(requested.uncertainty_instructions or "") > config.web.max_instruction_characters:
+        raise HTTPException(
+            status_code=422,
+            detail="Uncertainty instructions exceed the configured character limit",
+        )
 
     provider = config.provider.model_copy(
         update={"gemini": config.provider.gemini.model_copy(update={"model": requested.model})}
@@ -582,6 +607,17 @@ def _parse_job_settings(
                 requested.footnote_appearance_instructions
                 if "footnote_appearance_instructions" in requested.model_fields_set
                 else config.translation.footnote_appearance_instructions
+            ),
+            "mark_uncertain_terms": selected_uncertainty_level != "off",
+            "uncertainty_level": (
+                UncertaintyLevel(selected_uncertainty_level)
+                if selected_uncertainty_level != "off"
+                else config.translation.uncertainty_level
+            ),
+            "uncertainty_instructions": (
+                requested.uncertainty_instructions
+                if "uncertainty_instructions" in requested.model_fields_set
+                else config.translation.uncertainty_instructions
             ),
             "previous_page_context_count": requested.previous_page_context_count,
         }

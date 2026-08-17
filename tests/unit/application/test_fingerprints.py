@@ -7,6 +7,7 @@ from article_translator.domain.enums import (
     ManualInsertionReason,
     SegmentContinuation,
     SegmentHandling,
+    UncertaintyLevel,
 )
 from article_translator.domain.models import (
     ArtifactRef,
@@ -94,6 +95,37 @@ def test_page_fingerprint_changes_with_footnote_appearance_guidance() -> None:
     )
 
     assert changed != original
+
+
+def test_page_fingerprint_changes_with_uncertainty_policy() -> None:
+    page = _page()
+    provider = ProviderDescriptor(provider="fake", model="fake-v1")
+    original = fingerprints.page_input_fingerprint(
+        page=page,
+        settings=TranslationSettings(),
+        provider=provider,
+        prompt="page prompt",
+    )
+    high = fingerprints.page_input_fingerprint(
+        page=page,
+        settings=TranslationSettings(uncertainty_level=UncertaintyLevel.HIGH),
+        provider=provider,
+        prompt="page prompt",
+    )
+    instructed = fingerprints.page_input_fingerprint(
+        page=page,
+        settings=TranslationSettings(uncertainty_instructions="Mark all numbers."),
+        provider=provider,
+        prompt="page prompt",
+    )
+    disabled = fingerprints.page_input_fingerprint(
+        page=page,
+        settings=TranslationSettings(mark_uncertain_terms=False),
+        provider=provider,
+        prompt="page prompt",
+    )
+
+    assert len({original, high, instructed, disabled}) == 4
 
 
 def test_table_fingerprint_includes_prompt_first_pass_and_target_metadata() -> None:

@@ -37,7 +37,12 @@ custom_instructions = ""
 footnote_appearance_instructions = ""
 preserve_names = true
 preserve_citations = true
+# Set false to disable marking regardless of the configured level.
 mark_uncertain_terms = true
+# One of: "low", "standard", "high"
+uncertainty_level = "standard"
+# Optional extra review targets, for example all numbers or all medical terms.
+uncertainty_instructions = ""
 # Include this many finalized prior page translations as read-only continuity context.
 previous_page_context_count = 2
 
@@ -65,6 +70,8 @@ max_pdf_pages = 500
 max_glossary_entries = 500
 max_term_characters = 500
 max_instruction_characters = 4000
+# Choices displayed for each translation job. "off" maps to mark_uncertain_terms = false.
+uncertainty_level_choices = ["off", "low", "standard", "high"]
 status_poll_interval_ms = 1000
 # Original-page zoom choices in the validation workspace. The selection persists across pages.
 review_zoom_levels = [100, 125, 150, 175, 200]

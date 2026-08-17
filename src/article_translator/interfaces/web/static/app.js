@@ -102,6 +102,14 @@ const pageImageDpi = document.querySelector("#page-image-dpi");
 const footnoteAppearanceInstructions = document.querySelector(
   "#footnote-appearance-instructions",
 );
+const uncertaintyLevel = document.querySelector("#uncertainty-level");
+const uncertaintyInstructions = document.querySelector("#uncertainty-instructions");
+const uncertaintyInstructionsField = document.querySelector(
+  "#uncertainty-instructions-field",
+);
+const toggleUncertaintyInstructions = document.querySelector(
+  "#toggle-uncertainty-instructions",
+);
 const autoContinue = document.querySelector("#auto-continue");
 const autoContinueHelp = document.querySelector("#auto-continue-help");
 const jobSettingsError = document.querySelector("#job-settings-error");
@@ -489,6 +497,43 @@ function applyFile(file) {
   }
 }
 
+function setUncertaintyInstructionsExpanded(expanded) {
+  const shouldExpand = Boolean(expanded) && uncertaintyLevel.value !== "off";
+  uncertaintyInstructionsField.hidden = !shouldExpand;
+  toggleUncertaintyInstructions.setAttribute("aria-expanded", String(shouldExpand));
+  toggleUncertaintyInstructions.textContent = shouldExpand
+    ? "Hide instructions"
+    : "Add instructions";
+}
+
+function updateUncertaintySetupState() {
+  const isOff = uncertaintyLevel.value === "off";
+  toggleUncertaintyInstructions.disabled = isOff;
+  uncertaintyInstructions.disabled = isOff || startButton.disabled;
+  if (isOff) {
+    setUncertaintyInstructionsExpanded(false);
+  }
+}
+
+function handleTranslationFormClick(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const button = target?.closest("[data-action='toggle-uncertainty-instructions']");
+  if (!button || !form.contains(button)) {
+    return;
+  }
+  const expanded = button.getAttribute("aria-expanded") === "true";
+  setUncertaintyInstructionsExpanded(!expanded);
+  if (!expanded) {
+    uncertaintyInstructions.focus();
+  }
+}
+
+function handleTranslationFormChange(event) {
+  if (event.target === uncertaintyLevel) {
+    updateUncertaintySetupState();
+  }
+}
+
 function populateConfig(config) {
   state.config = config;
   const translation = config.translation || {};
@@ -533,10 +578,27 @@ function populateConfig(config) {
   footnoteAppearanceInstructions.value = asText(
     translation.footnote_appearance_instructions,
   );
+  uncertaintyLevel.replaceChildren();
+  const uncertaintyChoices = Array.isArray(config.uncertainty?.level_choices)
+    ? config.uncertainty.level_choices.map(asText).filter(Boolean)
+    : [];
+  const configuredUncertaintyLevel = translation.mark_uncertain_terms === false
+    ? "off"
+    : asText(translation.uncertainty_level);
+  for (const level of uncertaintyChoices) {
+    const option = createElement("option", "", humanize(level));
+    option.value = level;
+    option.selected = level === configuredUncertaintyLevel;
+    uncertaintyLevel.append(option);
+  }
+  uncertaintyInstructions.value = asText(translation.uncertainty_instructions);
   const maxInstructionCharacters = Number(config.limits?.max_instruction_characters);
   if (Number.isInteger(maxInstructionCharacters)) {
     footnoteAppearanceInstructions.maxLength = maxInstructionCharacters;
+    uncertaintyInstructions.maxLength = maxInstructionCharacters;
   }
+  setUncertaintyInstructionsExpanded(Boolean(uncertaintyInstructions.value));
+  updateUncertaintySetupState();
   autoContinue.checked = Boolean(config.automation?.auto_continue_default);
   const autoContinueAttempts = Number(config.automation?.auto_continue_attempts) || 1;
   autoContinueHelp.textContent =
@@ -617,6 +679,8 @@ function validateJobSettings() {
   const contextCount = Number(previousPageContextCount.value);
   const imageDpi = Number(pageImageDpi.value);
   const footnoteInstructions = footnoteAppearanceInstructions.value.trim();
+  const selectedUncertaintyLevel = uncertaintyLevel.value;
+  const uncertaintyInstructionText = uncertaintyInstructions.value.trim();
   previousPageContextCount.removeAttribute("aria-invalid");
   pageImageDpi.removeAttribute("aria-invalid");
   if (!Number.isInteger(contextCount) || contextCount < 0 || contextCount > 10) {
@@ -629,6 +693,17 @@ function validateJobSettings() {
     setInlineError(jobSettingsError, "Page image resolution must be a whole number from 72 to 600 DPI.");
     return null;
   }
+  const configuredUncertaintyChoices = Array.isArray(
+    state.config?.uncertainty?.level_choices,
+  )
+    ? state.config.uncertainty.level_choices
+    : [];
+  if (!configuredUncertaintyChoices.includes(selectedUncertaintyLevel)) {
+    uncertaintyLevel.setAttribute("aria-invalid", "true");
+    setInlineError(jobSettingsError, "Select an available uncertain term level.");
+    return null;
+  }
+  uncertaintyLevel.removeAttribute("aria-invalid");
   const maxInstructionCharacters = Number(
     state.config?.limits?.max_instruction_characters,
   );
@@ -643,7 +718,20 @@ function validateJobSettings() {
     );
     return null;
   }
+  if (
+    Number.isInteger(maxInstructionCharacters) &&
+    uncertaintyInstructionText.length > maxInstructionCharacters
+  ) {
+    uncertaintyInstructions.setAttribute("aria-invalid", "true");
+    setUncertaintyInstructionsExpanded(true);
+    setInlineError(
+      jobSettingsError,
+      `Uncertainty instructions must be ${maxInstructionCharacters} characters or fewer.`,
+    );
+    return null;
+  }
   footnoteAppearanceInstructions.removeAttribute("aria-invalid");
+  uncertaintyInstructions.removeAttribute("aria-invalid");
   setInlineError(jobSettingsError, "");
 
   const enteredKey = geminiApiKey.value.trim() || state.sessionApiKey;
@@ -662,6 +750,8 @@ function validateJobSettings() {
       target_language: targetLanguage,
       style: jobTranslationStyle.value,
       footnote_appearance_instructions: footnoteInstructions || null,
+      uncertainty_level: selectedUncertaintyLevel,
+      uncertainty_instructions: uncertaintyInstructionText || null,
       previous_page_context_count: contextCount,
       image_dpi: imageDpi,
       auto_continue: autoContinue.checked,
@@ -676,6 +766,9 @@ function setStartBusy(isBusy) {
   fileInput.disabled = isBusy;
   autoContinue.disabled = isBusy;
   footnoteAppearanceInstructions.disabled = isBusy;
+  uncertaintyLevel.disabled = isBusy;
+  toggleUncertaintyInstructions.disabled = isBusy || uncertaintyLevel.value === "off";
+  uncertaintyInstructions.disabled = isBusy || uncertaintyLevel.value === "off";
   startButtonLabel.textContent = isBusy ? "Uploading PDF…" : "Start translation";
 }
 
@@ -3038,6 +3131,8 @@ for (const button of tabButtons) {
 
 saveSettingsButton.addEventListener("click", saveSettings);
 clearSavedKeyButton.addEventListener("click", clearSavedApiKey);
+form.addEventListener("click", handleTranslationFormClick);
+form.addEventListener("change", handleTranslationFormChange);
 geminiApiKey.addEventListener("input", () => {
   setInlineError(apiKeyError, "");
   settingsMessage.textContent = "";

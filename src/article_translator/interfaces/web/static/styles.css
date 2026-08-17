@@ -35,7 +35,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -187,7 +188,8 @@ a {
 }
 
 .field-label input,
-.field-label select {
+.field-label select,
+.field-label textarea {
   width: 100%;
   min-height: 44px;
   padding: 0.65rem 0.75rem;
@@ -196,6 +198,10 @@ a {
   color: var(--ink);
   background: var(--surface);
   font-weight: 450;
+}
+
+.field-label textarea {
+  resize: vertical;
 }
 
 .field-label small,
@@ -207,13 +213,16 @@ a {
 }
 
 .field-label input:focus,
-.field-label select:focus {
+.field-label select:focus,
+.field-label textarea:focus {
   border-color: var(--focus);
   outline: 2px solid var(--focus);
   outline-offset: 1px;
 }
 
-.field-label input[aria-invalid="true"] {
+.field-label input[aria-invalid="true"],
+.field-label select[aria-invalid="true"],
+.field-label textarea[aria-invalid="true"] {
   border-color: var(--danger);
 }
 
@@ -530,6 +539,16 @@ td input[aria-invalid="true"] {
   color: var(--muted);
   font-weight: 400;
   line-height: 1.4;
+}
+
+.uncertainty-job-setting .compact-action {
+  justify-self: start;
+}
+
+.optional-instructions {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.15rem;
 }
 
 .settings-card {

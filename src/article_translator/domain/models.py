@@ -21,6 +21,7 @@ from article_translator.domain.enums import (
     SegmentContinuation,
     SegmentHandling,
     TranslationStyle,
+    UncertaintyLevel,
 )
 
 SCHEMA_VERSION: Literal["6.0"] = "6.0"
@@ -90,9 +91,15 @@ class TranslationSettings(ContractModel):
     preserve_names: bool = True
     preserve_citations: bool = True
     mark_uncertain_terms: bool = True
+    uncertainty_level: UncertaintyLevel = UncertaintyLevel.STANDARD
+    uncertainty_instructions: str | None = Field(default=None, max_length=4_000)
     previous_page_context_count: int = Field(default=0, ge=0, le=10)
 
-    @field_validator("custom_instructions", "footnote_appearance_instructions")
+    @field_validator(
+        "custom_instructions",
+        "footnote_appearance_instructions",
+        "uncertainty_instructions",
+    )
     @classmethod
     def normalize_optional_instructions(cls, value: str | None) -> str | None:
         if value is None:

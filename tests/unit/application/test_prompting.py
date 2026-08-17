@@ -11,6 +11,7 @@ from article_translator.domain.enums import (
     SegmentContinuation,
     SegmentHandling,
     TranslationStyle,
+    UncertaintyLevel,
 )
 from article_translator.domain.models import (
     ArtifactRef,
@@ -67,6 +68,8 @@ def test_prompt_contains_resolved_settings_and_delimited_page_markdown() -> None
         style=TranslationStyle.FAITHFUL,
         glossary={"Kolera": "cholera"},
         footnote_appearance_instructions="Small notes below a short horizontal rule.",
+        uncertainty_level=UncertaintyLevel.HIGH,
+        uncertainty_instructions="Mark all numbers and medical terms.",
     )
 
     prompt = build_page_prompt(
@@ -82,6 +85,8 @@ def test_prompt_contains_resolved_settings_and_delimited_page_markdown() -> None
     assert '"footnote_appearance_instructions": "Small notes below a short horizontal rule."' in (
         prompt
     )
+    assert '"uncertainty_level": "high"' in prompt
+    assert '"uncertainty_instructions": "Mark all numbers and medical terms."' in prompt
     assert "authoritative" in prompt
     assert "one structured block variant" in prompt
     assert "dedicated second pass" in prompt
@@ -109,6 +114,12 @@ def test_prompt_contains_resolved_settings_and_delimited_page_markdown() -> None
     assert "current page image as decisive" in prompt
     assert "rather than repeating the user's hint" in prompt
     assert "owner_review_required=true" in prompt
+    assert 'uncertainty_level="low"' in prompt
+    assert 'uncertainty_level="standard"' in prompt
+    assert 'uncertainty_level="high"' in prompt
+    assert "mark all numbers" in prompt
+    assert "User-requested number check" in prompt
+    assert "mark_uncertain_terms=false" in prompt
     assert "SOURCE_MARKDOWN_START\n# Om Kolera\nSOURCE_MARKDOWN_END" in prompt
 
 
@@ -159,6 +170,8 @@ def test_table_prompt_contains_complete_ocr_targets_segmentation_and_context() -
             source_language="Danish",
             target_language="English",
             glossary={"døde": "deaths"},
+            uncertainty_level=UncertaintyLevel.LOW,
+            uncertainty_instructions="Mark all numbers.",
             previous_page_context_count=1,
         ),
         previous_pages=[preceding],
@@ -170,11 +183,16 @@ def test_table_prompt_contains_complete_ocr_targets_segmentation_and_context() -
     assert '"continuation": "from_previous_page"' in prompt
     assert '"translated_text": "Introduction"' in prompt
     assert '"døde": "deaths"' in prompt
+    assert '"uncertainty_level": "low"' in prompt
+    assert '"uncertainty_instructions": "Mark all numbers."' in prompt
     assert "The sentence continues" in prompt
     assert "3 dead, on 3rd of July\n3, 4th" in prompt
     assert "Date | Deaths" in prompt
     assert "changing or inventing facts" in prompt
     assert "footnote or note-reference markers" in prompt
     assert "renders literally in its table cell" in prompt
+    assert "mark_uncertain_terms=false" in prompt
+    assert 'uncertainty_level="high"' in prompt
+    assert "user-requested review" in prompt
     assert "TABLE_TARGETS_START" in prompt
     assert "FIRST_PASS_SEGMENTATION_START" in prompt

@@ -169,6 +169,9 @@ def test_index_and_public_config_never_expose_secret(tmp_path: Path) -> None:
         "Job settings",
         "Previous-page text context",
         "Page image resolution (DPI)",
+        "Uncertain term level",
+        "Add instructions",
+        "Mark all numbers, or mark all medical terms",
         "Auto continue",
         "Save on this computer",
         "Original page",
@@ -195,6 +198,15 @@ def test_index_and_public_config_never_expose_secret(tmp_path: Path) -> None:
     assert payload["translation"]["source_language"] == "Danish"
     assert payload["translation"]["target_language"] == "English"
     assert payload["translation"]["footnote_appearance_instructions"] is None
+    assert payload["translation"]["mark_uncertain_terms"] is True
+    assert payload["translation"]["uncertainty_level"] == "standard"
+    assert payload["translation"]["uncertainty_instructions"] is None
+    assert payload["uncertainty"]["level_choices"] == [
+        "off",
+        "low",
+        "standard",
+        "high",
+    ]
     assert payload["provider"]["model"] == "gemini-3.6-flash"
     assert payload["extraction"]["image_dpi"] == 150
     assert payload["automation"] == {
@@ -365,12 +377,18 @@ def test_review_frontend_mounts_all_pages_and_uses_delegated_handlers(
     assert 'data-testid="page-image-dpi"' in html
     assert 'data-testid="auto-continue"' in html
     assert 'data-testid="footnote-appearance-instructions"' in html
+    assert 'data-testid="uncertainty-level"' in html
+    assert 'data-testid="uncertainty-instructions"' in html
     assert 'data-testid="review-zoom-select"' in html
     assert "function setReviewZoom" in javascript
     assert "state.reviewZoomPercent = normalized" in javascript
     assert '--review-page-zoom", String(normalized / 100)' in javascript
     assert "transform: scale(var(--review-page-zoom, 1))" in styles
     assert "footnote_appearance_instructions" in javascript
+    assert "uncertainty_level: selectedUncertaintyLevel" in javascript
+    assert "uncertainty_instructions: uncertaintyInstructionText || null" in javascript
+    assert 'form.addEventListener("click", handleTranslationFormClick)' in javascript
+    assert 'form.addEventListener("change", handleTranslationFormChange)' in javascript
     assert "auto_continue: autoContinue.checked" in javascript
     assert 'remove.dataset.action = "delete-review"' in javascript
     assert 'reviewComplete\n        ? "Read"' in javascript
@@ -492,6 +510,8 @@ def test_job_uses_selected_languages_model_style_and_session_key(
         "target_language": "German",
         "style": "faithful",
         "footnote_appearance_instructions": "Tiny notes below a rule.",
+        "uncertainty_level": "high",
+        "uncertainty_instructions": "Mark all medical terms.",
         "previous_page_context_count": 4,
         "image_dpi": 225,
         "auto_continue": True,
@@ -519,6 +539,9 @@ def test_job_uses_selected_languages_model_style_and_session_key(
     assert runtime_config.translation.target_language == "German"
     assert runtime_config.translation.style.value == "faithful"
     assert runtime_config.translation.footnote_appearance_instructions == "Tiny notes below a rule."
+    assert runtime_config.translation.mark_uncertain_terms is True
+    assert runtime_config.translation.uncertainty_level.value == "high"
+    assert runtime_config.translation.uncertainty_instructions == "Mark all medical terms."
     assert runtime_config.translation.previous_page_context_count == 4
     assert runtime_config.extraction.image_dpi == 225
     submitted_secret = manager.submissions[0][5]
@@ -560,6 +583,82 @@ def test_job_rejects_model_outside_config_allowlist(tmp_path: Path) -> None:
     assert not config.paths.artifacts_dir.exists()
 
 
+def test_job_maps_uncertainty_off_to_legacy_flag_and_keeps_configured_level(
+    tmp_path: Path,
+) -> None:
+    config = configured_for_tmp(tmp_path)
+    manager = RecordingJobManager()
+    app = create_app(config, job_manager=cast(WebJobManager, manager))
+    settings = {
+        "model": config.provider.gemini.model,
+        "source_language": "Danish",
+        "target_language": "English",
+        "style": "balanced",
+        "uncertainty_level": "off",
+        "uncertainty_instructions": "  Mark all numbers.  ",
+        "previous_page_context_count": 2,
+        "image_dpi": 150,
+        "auto_continue": False,
+    }
+
+    with TestClient(app) as client:
+        client.get("/")
+        response = client.post(
+            "/api/jobs",
+            files={"pdf": ("article.pdf", b"%PDF-1.7", "application/pdf")},
+            data={"glossary": "[]", "settings": json.dumps(settings)},
+            headers={"X-CSRF-Token": client.cookies["at_csrf"]},
+        )
+
+    assert response.status_code == 202
+    runtime_config = manager.submissions[0][4]
+    assert runtime_config.translation.mark_uncertain_terms is False
+    assert runtime_config.translation.uncertainty_level.value == "standard"
+    assert runtime_config.translation.uncertainty_instructions == "Mark all numbers."
+
+
+def test_job_rejects_uncertainty_level_outside_configured_choices(tmp_path: Path) -> None:
+    config = configured_for_tmp(tmp_path)
+    config = config.model_copy(
+        update={
+            "web": config.web.model_copy(
+                update={"uncertainty_level_choices": ["off", "low", "standard"]}
+            )
+        }
+    )
+    manager = RecordingJobManager()
+    app = create_app(config, job_manager=cast(WebJobManager, manager))
+
+    with TestClient(app) as client:
+        client.get("/")
+        response = client.post(
+            "/api/jobs",
+            files={"pdf": ("article.pdf", b"%PDF-1.7", "application/pdf")},
+            data={
+                "glossary": "[]",
+                "settings": json.dumps(
+                    {
+                        "model": config.provider.gemini.model,
+                        "source_language": "Danish",
+                        "target_language": "English",
+                        "style": "balanced",
+                        "uncertainty_level": "high",
+                        "previous_page_context_count": 2,
+                        "image_dpi": 150,
+                        "auto_continue": False,
+                    }
+                ),
+            },
+            headers={"X-CSRF-Token": client.cookies["at_csrf"]},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "Select an uncertainty level allowed by the project configuration"
+    )
+    assert manager.submissions == []
+
+
 def test_job_rejects_footnote_guidance_above_configured_limit(tmp_path: Path) -> None:
     config = configured_for_tmp(tmp_path)
     config = config.model_copy(
@@ -592,6 +691,45 @@ def test_job_rejects_footnote_guidance_above_configured_limit(tmp_path: Path) ->
         )
 
     assert response.status_code == 422
+    assert manager.submissions == []
+
+
+def test_job_rejects_uncertainty_instructions_above_configured_limit(tmp_path: Path) -> None:
+    config = configured_for_tmp(tmp_path)
+    config = config.model_copy(
+        update={"web": config.web.model_copy(update={"max_instruction_characters": 10})}
+    )
+    manager = RecordingJobManager()
+    app = create_app(config, job_manager=cast(WebJobManager, manager))
+
+    with TestClient(app) as client:
+        client.get("/")
+        response = client.post(
+            "/api/jobs",
+            files={"pdf": ("article.pdf", b"%PDF-1.7", "application/pdf")},
+            data={
+                "glossary": "[]",
+                "settings": json.dumps(
+                    {
+                        "model": config.provider.gemini.model,
+                        "source_language": "Danish",
+                        "target_language": "English",
+                        "style": "balanced",
+                        "uncertainty_level": "standard",
+                        "uncertainty_instructions": "Mark every number",
+                        "previous_page_context_count": 2,
+                        "image_dpi": 150,
+                        "auto_continue": False,
+                    }
+                ),
+            },
+            headers={"X-CSRF-Token": client.cookies["at_csrf"]},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "Uncertainty instructions exceed the configured character limit"
+    )
     assert manager.submissions == []
 
 

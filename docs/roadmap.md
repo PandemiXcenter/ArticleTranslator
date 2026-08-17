@@ -175,6 +175,8 @@ Implemented:
   tables), reviewed-unchanged blocks, and manually edited revisions;
 - visible qualitative uncertainty details and conditional Translate One /
   Translate All correction;
+- TOML-backed Off/Low/Standard/High uncertainty selection plus optional per-job
+  review-target instructions shared by page and table prompts;
 - an Uncertain terms list grouped and ordered by unresolved occurrence count,
   with page locations and first-occurrence navigation;
 - conditional Review/Read actions based on accepted-block progress;

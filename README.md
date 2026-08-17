@@ -101,7 +101,7 @@ preceding machine fragment.
 
 The same context can resolve a word, sentence, heading, footnote, or table
 continuation that enters the current page. The main contract is versioned as
-`translate-page-v9`; the table contract is `reconstruct-tables-v1`.
+`translate-page-v10`; the table contract is `reconstruct-tables-v2`.
 
 ## Quick start: local interface
 
@@ -260,7 +260,8 @@ contains:
 - source/target languages;
 - `faithful`, `balanced`, or `readable` translation style;
 - custom translator instructions and glossary;
-- name, citation, and qualitative uncertainty policies;
+- name and citation policies, plus an uncertainty level and optional explicit
+  review targets;
 - finalized previous-page translation context count (0–10, default 2);
 - Markdown page-comment and marginalia behavior;
 - local XeLaTeX executable and bounded PDF compilation timeout;
@@ -275,9 +276,12 @@ keys are never stored there.
 
 The interface uses TOML values as defaults and limits. Input language, output
 language, model, translation style, previous-page text context, page-image DPI,
-and term mappings are explicit per-job selections; the resolved values are passed
-through the same application boundary and persisted as run provenance. A model can
-be selected only when it appears in `provider.gemini.selectable_models`.
+uncertain-term level, optional uncertainty instructions, footnote appearance, and
+term mappings are explicit per-job selections; the resolved values are passed
+through the same application boundary and persisted as run provenance. The
+uncertainty choices are configured by `web.uncertainty_level_choices`; **Off**
+retains compatibility by resolving `mark_uncertain_terms=false`. A model can be
+selected only when it appears in `provider.gemini.selectable_models`.
 
 `.env` is exclusively for `GEMINI_API_KEY`. Do not add model names, paths,
 translation choices, or other non-secret behavior to environment variables. The

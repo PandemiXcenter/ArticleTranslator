@@ -177,6 +177,29 @@
                   >
                   <small>Resolution used to render the current PDF page for Gemini and review.</small>
                 </label>
+                <div class="field-label uncertainty-job-setting">
+                  <label for="uncertainty-level">Uncertain term level</label>
+                  <select id="uncertainty-level" data-testid="uncertainty-level"></select>
+                  <small>Controls how broadly the model marks text for review.</small>
+                  <button
+                    class="text-button compact-action"
+                    id="toggle-uncertainty-instructions"
+                    data-action="toggle-uncertainty-instructions"
+                    type="button"
+                    aria-expanded="false"
+                    aria-controls="uncertainty-instructions-field"
+                  >Add instructions</button>
+                  <div id="uncertainty-instructions-field" class="optional-instructions" hidden>
+                    <label for="uncertainty-instructions">Additional review instructions</label>
+                    <textarea
+                      id="uncertainty-instructions"
+                      data-testid="uncertainty-instructions"
+                      rows="3"
+                      placeholder="For example: Mark all numbers, or mark all medical terms."
+                    ></textarea>
+                    <small>Optional targets to mark even when their translation is otherwise clear.</small>
+                  </div>
+                </div>
                 <label class="field-label job-wide-field" for="footnote-appearance-instructions">
                   How footnotes look
                   <textarea

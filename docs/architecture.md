@@ -172,9 +172,9 @@ Never overload the phrase “page number”:
 
 Every request contains exactly one current-page PNG, that page's complete
 Markdown, and the fully resolved translation settings. The primary pass uses
-`translate-page-v9`. When that pass tags at least one table or table-like region,
+`translate-page-v10`. When that pass tags at least one table or table-like region,
 the pipeline immediately makes one additional batched request for that page using
-`reconstruct-tables-v1`; it sends the same PNG and complete page MarkItDown/OCR,
+`reconstruct-tables-v2`; it sends the same PNG and complete page MarkItDown/OCR,
 plus the first-pass segmentation and exact table targets. Multiple table regions
 on one page do not create multiple follow-ups.
 
@@ -196,6 +196,16 @@ describing likely placement, typography, rules, or markers in simple terms. The
 prompt treats this as an inspection hint while keeping the page image authoritative;
 the model's per-note appearance field records observed evidence rather than copying
 the hint.
+
+Uncertainty behavior is also resolved per job. **Off** sets the existing
+`mark_uncertain_terms` compatibility flag to false. Low marks only materially
+unsafe readings; Standard also covers meaningful ambiguity, archaic usage, and
+terminology with multiple plausible renderings; High proactively includes
+plausible specialist-review cases without marking clearly supported content.
+Optional `uncertainty_instructions` add explicit review targets such as every
+number or every medical term. Both page and table prompts treat those targets as
+user-requested review, not fabricated model doubt. The level, instructions, and
+enabled flag are persisted and participate in checkpoint identity.
 
 ### Previous-page continuity context
 
@@ -480,7 +490,9 @@ implemented.
 The browser interface is intentionally operational rather than promotional:
 
 - **Translate** selects a PDF and per-job input/output languages. TOML supplies
-  the defaults; the checked-in direction is Danish to English.
+  the defaults; the checked-in direction is Danish to English. Job settings also
+  expose the config-allowlisted uncertainty level and an optional expandable field
+  for explicit reviewer targets.
 - **Term mappings** supplies authoritative archaic or specialist translations
   for the next job.
 - **Settings** selects an allowlisted Gemini model, translation style, and key
